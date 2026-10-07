@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::io::IsTerminal;
@@ -7,6 +9,9 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 
 use clap::Parser;
 use clap::Subcommand;
@@ -61,6 +66,9 @@ enum CliCommand {
         refresh: bool,
     },
     /// Switch ~/.codex/auth.json to one stored account.
+    ///
+    /// Also stops a leftover `codex app-server --listen` process. Ctrl+C only
+    /// exits the terminal UI; that background server keeps the previous account.
     Switch {
         account: Option<String>,
         #[arg(long)]
@@ -606,7 +614,12 @@ async fn switch_account(
         }
 
         profile_files::sync_account_profile_in_store_path(store_path, account)?;
+        // Ctrl+C leaves `codex app-server --listen` running with the old account.
+        // Stop it before and after replacing auth.json so a restart cannot
+        // reload the previous login or write that login back.
+        stop_listening_codex_app_servers()?;
         profile_files::apply_account_profile(account)?;
+        stop_listening_codex_app_servers()?;
         store.settings.active_account_id = Some(account.id.clone());
     }
 
@@ -633,6 +646,88 @@ async fn switch_account(
         launched_codex: launch,
         provider_sync_error,
     })
+}
+
+fn process_name_is_codex(name: &str) -> bool {
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    name.eq_ignore_ascii_case("codex")
+}
+
+fn is_listening_codex_app_server(name: &str, cmd: &[impl AsRef<OsStr>]) -> bool {
+    if !process_name_is_codex(name) {
+        return false;
+    }
+    let mut saw_app_server = false;
+    let mut saw_listen = false;
+    for arg in cmd {
+        let arg = arg.as_ref();
+        if arg == OsStr::new("app-server") {
+            saw_app_server = true;
+        } else if arg == OsStr::new("--listen") || arg.to_string_lossy().starts_with("--listen=") {
+            saw_listen = true;
+        }
+    }
+    saw_app_server && saw_listen
+}
+
+fn listening_codex_app_server_pids() -> Vec<sysinfo::Pid> {
+    let system = sysinfo::System::new_all();
+    let current_pid = sysinfo::get_current_pid().ok();
+    let current_user = current_pid
+        .and_then(|pid| system.process(pid))
+        .and_then(|process| process.user_id())
+        .cloned();
+    system
+        .processes()
+        .iter()
+        .filter(|(pid, process)| {
+            current_pid != Some(**pid)
+                && match &current_user {
+                    Some(user) => process.user_id() == Some(user),
+                    None => true,
+                }
+                && is_listening_codex_app_server(process.name(), process.cmd())
+        })
+        .map(|(pid, _)| *pid)
+        .collect()
+}
+
+fn stop_listening_codex_app_servers() -> Result<(), String> {
+    let targets: HashSet<sysinfo::Pid> = listening_codex_app_server_pids().into_iter().collect();
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    {
+        let system = sysinfo::System::new_all();
+        for pid in &targets {
+            if let Some(process) = system.process(*pid) {
+                let _ = process.kill();
+            }
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let stuck: Vec<sysinfo::Pid> = listening_codex_app_server_pids()
+            .into_iter()
+            .filter(|pid| targets.contains(pid))
+            .collect();
+        if stuck.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let list = stuck
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "无法结束残留的 Codex app-server（{list}）。请退出这些进程后再切换。"
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn launch_codex(configured_path: Option<&str>, workspace: Option<&Path>) -> Result<(), String> {
@@ -1393,6 +1488,7 @@ mod tests {
     use super::confirm_account_deletion;
     use super::delete_account;
     use super::is_cli_invocation;
+    use super::is_listening_codex_app_server;
     use crate::models::AccountsStore;
     use crate::models::StoredAccount;
     use crate::store;
@@ -1402,6 +1498,47 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
     use uuid::Uuid;
+
+    #[test]
+    fn listening_app_server_match_ignores_the_pid_update_loop_and_terminal_ui() {
+        let managed = [
+            OsString::from("/Users/me/.codex/packages/codex"),
+            OsString::from("app-server"),
+            OsString::from("--listen"),
+            OsString::from("unix://"),
+            OsString::from("--managed-daemon"),
+        ];
+        assert!(is_listening_codex_app_server("codex", &managed));
+        assert!(is_listening_codex_app_server(
+            "codex.exe",
+            &[
+                OsString::from("codex.exe"),
+                OsString::from("app-server"),
+                OsString::from("--listen=unix://"),
+            ],
+        ));
+        assert!(!is_listening_codex_app_server(
+            "codex",
+            &[
+                OsString::from("codex"),
+                OsString::from("app-server"),
+                OsString::from("daemon"),
+                OsString::from("pid-update-loop"),
+            ],
+        ));
+        assert!(!is_listening_codex_app_server(
+            "codex",
+            &[OsString::from("codex")],
+        ));
+        assert!(!is_listening_codex_app_server(
+            "ChatGPT for Chrome",
+            &[
+                OsString::from("ChatGPT for Chrome"),
+                OsString::from("app-server"),
+                OsString::from("--listen"),
+            ],
+        ));
+    }
 
     #[test]
     fn detects_direct_and_prefixed_cli_invocations() {
