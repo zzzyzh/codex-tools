@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::collections::HashSet;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -8,10 +7,11 @@ use std::io::IsTerminal;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use std::time::Instant;
 
 use clap::Parser;
 use clap::Subcommand;
@@ -585,6 +585,7 @@ async fn switch_account(
             .accounts
             .get_mut(selected_index)
             .ok_or_else(|| "找不到要切换的账号".to_string())?;
+        eprintln!("正在切换到 {}...", account.label);
 
         if matches!(account.source_kind, AccountSourceKind::Chatgpt)
             && auth::auth_tokens_need_refresh(&account.auth_json)
@@ -599,20 +600,27 @@ async fn switch_account(
                 ));
             }
 
-            match auth::refresh_chatgpt_auth_tokens_serialized(&account.auth_json, &refresh_lock)
-                .await
-            {
-                Ok(refreshed) => {
+            eprintln!("正在刷新登录令牌...");
+            let refresh_result = tokio::time::timeout(
+                Duration::from_secs(20),
+                auth::refresh_chatgpt_auth_tokens_serialized(&account.auth_json, &refresh_lock),
+            )
+            .await;
+            match refresh_result {
+                Ok(Ok(refreshed)) => {
                     account.auth_json = refreshed;
                     account.auth_refresh_blocked = false;
                     account.auth_refresh_error = None;
                     account.updated_at = utils::now_unix_seconds();
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     return Err(format!(
                         "切换账号前刷新登录令牌失败: {}",
                         normalize_cli_usage_error(&error)
                     ));
+                }
+                Err(_) => {
+                    return Err("切换账号前刷新登录令牌超时。请检查网络或代理后再试。".to_string());
                 }
             }
         }
@@ -675,7 +683,12 @@ fn is_listening_codex_app_server(name: &str, cmd: &[impl AsRef<OsStr>]) -> bool 
 }
 
 fn listening_codex_app_server_pids() -> Vec<sysinfo::Pid> {
-    let system = sysinfo::System::new_all();
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessRefreshKind::new()
+            .with_cmd(sysinfo::UpdateKind::Always)
+            .with_user(sysinfo::UpdateKind::Always),
+    );
     let current_pid = sysinfo::get_current_pid().ok();
     let current_user = current_pid
         .and_then(|pid| system.process(pid))
@@ -696,42 +709,28 @@ fn listening_codex_app_server_pids() -> Vec<sysinfo::Pid> {
         .collect()
 }
 
+fn listening_codex_app_server_pids_with_timeout() -> Option<Vec<sysinfo::Pid>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(listening_codex_app_server_pids());
+    });
+    receiver.recv_timeout(Duration::from_secs(3)).ok()
+}
+
 fn stop_listening_codex_app_servers() -> Result<(), String> {
-    let targets: HashSet<sysinfo::Pid> = listening_codex_app_server_pids().into_iter().collect();
+    let Some(targets) = listening_codex_app_server_pids_with_timeout() else {
+        eprintln!("warning: 查找残留 Codex app-server 超时，继续切换。");
+        return Ok(());
+    };
     if targets.is_empty() {
         return Ok(());
     }
 
-    {
-        let system = sysinfo::System::new_all();
-        for pid in &targets {
-            if let Some(process) = system.process(*pid) {
-                let _ = process.kill();
-            }
-        }
+    for pid in &targets {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
     }
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let stuck: Vec<sysinfo::Pid> = listening_codex_app_server_pids()
-            .into_iter()
-            .filter(|pid| targets.contains(pid))
-            .collect();
-        if stuck.is_empty() {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            let list = stuck
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(format!(
-                "无法结束残留的 Codex app-server（{list}）。请退出这些进程后再切换。"
-            ));
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+    thread::sleep(Duration::from_millis(200));
+    Ok(())
 }
 
 fn launch_codex(configured_path: Option<&str>, workspace: Option<&Path>) -> Result<(), String> {
