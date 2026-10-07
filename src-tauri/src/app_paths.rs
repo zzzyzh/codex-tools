@@ -50,6 +50,12 @@ pub(crate) fn codex_dir() -> Result<PathBuf, String> {
         }
     }
 
+    // Codex reads and writes auth.json under CODEX_HOME. Honor the same
+    // variable so `ctc switch` updates the directory the CLI actually uses.
+    if let Some(path) = env_path("CODEX_HOME") {
+        return Ok(path);
+    }
+
     let home = dirs::home_dir().ok_or_else(|| "无法读取 HOME 目录".to_string())?;
     Ok(home.join(".codex"))
 }

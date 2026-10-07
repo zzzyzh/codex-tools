@@ -52,6 +52,7 @@ struct CliArgs {
     data_dir: Option<PathBuf>,
     #[arg(long, global = true)]
     json: bool,
+    /// Directory containing auth.json and config.toml. Defaults to $CODEX_HOME, then ~/.codex.
     #[arg(long, global = true, value_name = "DIR")]
     codex_home: Option<PathBuf>,
     #[command(subcommand)]
@@ -65,7 +66,7 @@ enum CliCommand {
         #[arg(long)]
         refresh: bool,
     },
-    /// Switch ~/.codex/auth.json to one stored account.
+    /// Switch $CODEX_HOME/auth.json, or ~/.codex/auth.json, to one stored account.
     ///
     /// Also stops a leftover `codex app-server --listen` process. Ctrl+C only
     /// exits the terminal UI; that background server keeps the previous account.
@@ -280,6 +281,9 @@ fn normalize_cli_args(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsStri
 }
 
 async fn run_cli(args: CliArgs) -> Result<(), String> {
+    if let Some(codex_home) = args.codex_home.as_deref() {
+        std::env::set_var("CODEX_HOME", codex_home);
+    }
     let store_path = resolve_store_path(args.data_dir.as_deref())?;
     match args.command {
         CliCommand::List { refresh } => {
