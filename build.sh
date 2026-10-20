@@ -66,19 +66,47 @@ fi
 
 cargo build --release --manifest-path "${ROOT}/src-tauri/Cargo.toml" --bin codex-tools-cli
 
-binary="${ROOT}/src-tauri/target/release/codex-tools-cli"
-install_dir="${HOME}/.local/bin"
-mkdir -p "${install_dir}"
-ln -sfn "${binary}" "${install_dir}/ctc"
-chmod +x "${binary}"
+built="${ROOT}/src-tauri/target/release/codex-tools-cli"
+# 每个容器有自己的 /root 和 /usr/local。把二进制拷进当前容器，
+# 避免两个容器共用一份编译产物时互相覆盖。
+install_root="${HOME}/.local/lib/codex-tools"
+mkdir -p "${install_root}" "${HOME}/.local/bin"
+installed="${install_root}/codex-tools-cli"
+cp -f "${built}" "${installed}"
+chmod +x "${installed}"
 
-echo "已编译: ${binary}"
-echo "已链接: ${install_dir}/ctc -> ${binary}"
-case ":${PATH}:" in
-  *":${install_dir}:"*) ;;
-  *)
-    echo "把下面这行加进 shell 配置后再开一个终端:"
-    echo "  export PATH=\"${install_dir}:\$PATH\""
-    ;;
-esac
+link_ctc() {
+  local dest_dir="$1"
+  if [[ ! -d "${dest_dir}" || ! -w "${dest_dir}" ]]; then
+    return 1
+  fi
+  ln -sfn "${installed}" "${dest_dir}/ctc"
+  echo "已链接: ${dest_dir}/ctc -> ${installed}"
+}
+
+echo "已编译: ${built}"
+echo "已安装: ${installed}"
+link_ctc "${HOME}/.local/bin" || true
+# 容器的默认 PATH 包含 /usr/local/bin，不包含 ~/.local/bin。
+# 能写就把当前容器正在使用的 ctc 换成这一份。
+link_ctc /usr/local/bin || true
+
+resolve_ctc() {
+  local dir
+  local IFS=':'
+  for dir in ${PATH}; do
+    if [[ -x "${dir}/ctc" ]]; then
+      echo "${dir}/ctc"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ctc_path="$(resolve_ctc)"; then
+  echo "当前命令: ${ctc_path}"
+else
+  echo "当前 PATH 找不到 ctc。把下面这行加进 shell 配置后再开一个终端:"
+  echo "  export PATH=\"${HOME}/.local/bin:\$PATH\""
+fi
 echo "用法: ctc switch <账号>"
