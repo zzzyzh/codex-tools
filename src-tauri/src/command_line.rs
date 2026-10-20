@@ -578,7 +578,8 @@ async fn switch_account(
     let mut store = store::load_store_from_path(store_path)?;
     let summaries = account_summaries(&store);
     let selected_index = resolve_single_account_index(&store, &summaries, account_ref, best)?;
-    let refresh_lock = Arc::new(Mutex::new(()));
+    // 切换前只收回磁盘上已经轮换过的凭证，不主动请求新 token。
+    super::capture_current_auth_for_active_profile(store_path, &mut store)?;
 
     {
         let account = store
@@ -586,44 +587,6 @@ async fn switch_account(
             .get_mut(selected_index)
             .ok_or_else(|| "找不到要切换的账号".to_string())?;
         eprintln!("正在切换到 {}...", account.label);
-
-        if matches!(account.source_kind, AccountSourceKind::Chatgpt)
-            && auth::auth_tokens_need_refresh(&account.auth_json)
-        {
-            if account.auth_refresh_blocked {
-                return Err(format!(
-                    "切换账号前刷新登录令牌失败: {}",
-                    account
-                        .auth_refresh_error
-                        .clone()
-                        .unwrap_or_else(|| "工具保存的授权快照已失效，请重新登录授权。".to_string())
-                ));
-            }
-
-            eprintln!("正在刷新登录令牌...");
-            let refresh_result = tokio::time::timeout(
-                Duration::from_secs(20),
-                auth::refresh_chatgpt_auth_tokens_serialized(&account.auth_json, &refresh_lock),
-            )
-            .await;
-            match refresh_result {
-                Ok(Ok(refreshed)) => {
-                    account.auth_json = refreshed;
-                    account.auth_refresh_blocked = false;
-                    account.auth_refresh_error = None;
-                    account.updated_at = utils::now_unix_seconds();
-                }
-                Ok(Err(error)) => {
-                    return Err(format!(
-                        "切换账号前刷新登录令牌失败: {}",
-                        normalize_cli_usage_error(&error)
-                    ));
-                }
-                Err(_) => {
-                    return Err("切换账号前刷新登录令牌超时。请检查网络或代理后再试。".to_string());
-                }
-            }
-        }
 
         profile_files::sync_account_profile_in_store_path(store_path, account)?;
         // Ctrl+C leaves `codex app-server --listen` running with the old account.

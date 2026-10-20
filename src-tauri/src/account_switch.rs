@@ -19,8 +19,9 @@ pub(crate) async fn apply_target_profile(
         .active_account_id
         .clone()
         .filter(|active_id| active_id != id);
+    // 先把磁盘上已轮换的凭证收进对应账号，再覆盖 auth.json。这里不请求刷新。
+    capture_current_auth_for_active_profile(&store_path, &mut latest_store)?;
     if let Some(active_id) = previous_active_id.as_deref() {
-        capture_current_auth_for_active_profile(&store_path, &mut latest_store)?;
         // 先保存当前账号在 Codex 内产生的配置改动，再应用目标 profile。
         profile_files::capture_current_config_for_profile(&store_path, active_id)?;
     }

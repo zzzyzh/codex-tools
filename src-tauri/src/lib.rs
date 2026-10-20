@@ -1924,7 +1924,28 @@ async fn switch_account_and_launch(
             .find(|account| account.id == id)
             .cloned()
             .ok_or_else(|| "找不到要切换的账号".to_string())?;
-        let mut refreshed_auth_updated_at = None;
+        // 切换只安装已保存的凭证。若本地已有同一账号更新过的快照，用那一份，
+        // 不向认证服务刷新，避免轮换 refresh token 后把其他副本一并失效。
+        let refreshed_auth_updated_at = if matches!(
+            account.source_kind,
+            models::AccountSourceKind::Chatgpt
+        ) {
+            let latest_auth = account_service::refresh_latest_auth_json_if_newer(
+                &app,
+                state.inner(),
+                &account.account_key(),
+                &account.auth_json,
+            )
+            .await;
+            if latest_auth != account.auth_json {
+                account.auth_json = latest_auth;
+                Some(utils::now_unix_seconds())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let current_account_key = auth::current_auth_account_key();
         let current_variant_key = auth::current_auth_variant_key();
@@ -1960,78 +1981,6 @@ async fn switch_account_and_launch(
             log::info!(
                 "MACOS_CODEX_SWITCH action=relaunch-noop reason=codex-home-mismatch-or-not-running"
             );
-        }
-
-        if matches!(account.source_kind, models::AccountSourceKind::Chatgpt) {
-            let account_key = account.account_key();
-            let latest_auth = account_service::refresh_latest_auth_json_if_newer(
-                &app,
-                state.inner(),
-                &account_key,
-                &account.auth_json,
-            )
-            .await;
-            let mut auth_snapshot_changed = latest_auth != account.auth_json;
-            account.auth_json = latest_auth;
-
-            if auth::auth_tokens_need_refresh(&account.auth_json) {
-                if account.auth_refresh_blocked {
-                    return Err(format!(
-                        "切换账号前刷新登录令牌失败: {}",
-                        account.auth_refresh_error.clone().unwrap_or_else(|| {
-                            "工具保存的授权快照已失效，请重新登录授权。".to_string()
-                        })
-                    ));
-                }
-
-                match auth::refresh_chatgpt_auth_tokens(&account.auth_json).await {
-                    Ok(refreshed_auth) => {
-                        account.auth_json = refreshed_auth;
-                        auth_snapshot_changed = true;
-                    }
-                    Err(error) => {
-                        // stale/reused/revoked 先尝试复用本地较新的快照，避免把并发刷新误判成永久失效。
-                        if let Some(recovered) =
-                            account_service::recover_refresh_failure_from_latest_snapshot(
-                                &app,
-                                state.inner(),
-                                &account_key,
-                                &account.auth_json,
-                                &error,
-                            )
-                            .await
-                        {
-                            account.auth_json = recovered;
-                            auth_snapshot_changed = true;
-                        } else {
-                            let normalized_error = normalize_switch_refresh_error(&error);
-                            let should_block_refresh = normalized_error
-                                == "当前账号的 refresh_token 已失效或已被轮换，请重新登录授权。"
-                                || normalized_error == "当前账号授权已过期，请重新登录授权。";
-
-                            if should_block_refresh {
-                                let blocked_message = "工具保存的授权快照已失效，请重新登录授权。";
-                                if let Err(persist_error) = persist_switch_refresh_blocked(
-                                    &app,
-                                    state.inner(),
-                                    &account_key,
-                                    blocked_message,
-                                )
-                                .await
-                                {
-                                    log::warn!("切换失败后写回账号停刷状态失败: {persist_error}");
-                                }
-                            }
-
-                            return Err(format!("切换账号前刷新登录令牌失败: {normalized_error}"));
-                        }
-                    }
-                }
-            }
-
-            if auth_snapshot_changed {
-                refreshed_auth_updated_at = Some(utils::now_unix_seconds());
-            }
         }
 
         let should_sync_opencode = store.settings.sync_opencode_openai_auth;
@@ -2223,33 +2172,41 @@ fn should_capture_current_auth_for_active_profile(
         && auth::has_newer_auth_refresh_snapshot(current_auth, &active_account.auth_json)
 }
 
-fn capture_current_auth_for_active_profile(
+pub(crate) fn capture_current_auth_for_active_profile(
     store_path: &std::path::Path,
     store: &mut AccountsStore,
 ) -> Result<bool, String> {
-    let Some(active_id) = store.settings.active_account_id.clone() else {
-        return Ok(false);
-    };
     let Some(current_auth) = auth::read_current_codex_auth_optional()? else {
         return Ok(false);
     };
     let Some(current_account_key) = auth::auth_account_key(&current_auth) else {
         return Ok(false);
     };
-    let Some(active_account) = store
+    let active_id = store.settings.active_account_id.clone();
+    let matched_index = store
         .accounts
-        .iter_mut()
-        .find(|account| account.id == active_id)
-    else {
+        .iter()
+        .position(|account| {
+            active_id.as_deref() == Some(account.id.as_str())
+                && should_capture_current_auth_for_active_profile(
+                    account,
+                    &current_account_key,
+                    &current_auth,
+                )
+        })
+        .or_else(|| {
+            store.accounts.iter().position(|account| {
+                should_capture_current_auth_for_active_profile(
+                    account,
+                    &current_account_key,
+                    &current_auth,
+                )
+            })
+        });
+    let Some(matched_index) = matched_index else {
         return Ok(false);
     };
-    if !should_capture_current_auth_for_active_profile(
-        active_account,
-        &current_account_key,
-        &current_auth,
-    ) {
-        return Ok(false);
-    }
+    let active_account = &mut store.accounts[matched_index];
 
     // Persist the running client's rotated refresh token before another profile
     // overwrites auth.json. Identity and monotonic timestamp checks above prevent
@@ -2301,27 +2258,6 @@ fn noop_switch_account_result(account: &StoredAccount) -> SwitchAccountResult {
         editor_restart_error: None,
         provider_sync_error: None,
     }
-}
-
-async fn persist_switch_refresh_blocked(
-    app: &AppHandle,
-    state: &AppState,
-    account_key: &str,
-    blocked_message: &str,
-) -> Result<(), String> {
-    let _guard = state.store_lock.lock().await;
-    let data_dir = app_paths::app_data_dir(app)?;
-    let store_path = store::account_store_path_from_data_dir(&data_dir);
-    store::update_account_group_refresh_state_in_path(
-        &store_path,
-        account_key,
-        None,
-        true,
-        Some(blocked_message),
-        utils::now_unix_seconds(),
-        true,
-    )?;
-    Ok(())
 }
 
 fn launch_codex_app(
@@ -2384,40 +2320,6 @@ fn launch_codex_app(
         let _ = launch_as_admin;
         Err("当前平台暂不支持直接启动 Codex 应用".to_string())
     }
-}
-
-fn normalize_switch_refresh_error(raw_error: &str) -> String {
-    let normalized = raw_error.to_ascii_lowercase();
-    if normalized.contains("refresh_token_reused")
-        || is_invalid_refresh_grant(&normalized)
-        || normalized
-            .contains("your refresh token has already been used to generate a new access token")
-        || normalized.contains("refresh token expired")
-        || normalized.contains("refresh_token expired")
-        || normalized.contains("expired refresh token")
-        || normalized.contains("refresh token is expired")
-        || normalized.contains("refresh token revoked")
-        || normalized.contains("refresh_token_revoked")
-        || normalized.contains("refresh token invalid")
-        || normalized.contains("invalid refresh token")
-    {
-        return "当前账号的 refresh_token 已失效或已被轮换，请重新登录授权。".to_string();
-    }
-    if normalized.contains("please try signing in again")
-        || normalized.contains("provided authentication token is expired")
-        || normalized.contains("token is expired")
-    {
-        return "当前账号授权已过期，请重新登录授权。".to_string();
-    }
-    raw_error.to_string()
-}
-
-fn is_invalid_refresh_grant(normalized_error: &str) -> bool {
-    normalized_error.contains("invalid_grant")
-        && (normalized_error.contains("refresh")
-            || normalized_error.contains("expired")
-            || normalized_error.contains("revoked")
-            || normalized_error.contains("invalid"))
 }
 
 #[tauri::command]
