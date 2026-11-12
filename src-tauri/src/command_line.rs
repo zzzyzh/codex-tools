@@ -310,7 +310,7 @@ async fn run_cli(args: CliArgs) -> Result<(), String> {
             let accounts = if refresh {
                 refresh_usage(&store_path, None).await?
             } else {
-                account_summaries(&store::load_store_from_path(&store_path)?)
+                account_summaries(&remember_rotated_live_auth(&store_path)?)
             };
             print_accounts(&accounts, args.json)
         }
@@ -454,7 +454,7 @@ async fn run_cli(args: CliArgs) -> Result<(), String> {
         CliCommand::Usage { account, cached } => {
             let accounts = if cached {
                 selected_summaries_from_store(
-                    &store::load_store_from_path(&store_path)?,
+                    &remember_rotated_live_auth(&store_path)?,
                     account.as_deref(),
                 )?
             } else {
@@ -595,11 +595,19 @@ fn selected_summaries_from_store(
         .collect())
 }
 
+fn remember_rotated_live_auth(store_path: &Path) -> Result<AccountsStore, String> {
+    let mut store = store::load_store_from_path(store_path)?;
+    if super::capture_current_auth_for_active_profile(store_path, &mut store)? {
+        store::save_store_to_path(store_path, &store)?;
+    }
+    Ok(store)
+}
+
 async fn refresh_usage(
     store_path: &Path,
     account_ref: Option<&str>,
 ) -> Result<Vec<AccountSummary>, String> {
-    let mut store = store::load_store_from_path(store_path)?;
+    let mut store = remember_rotated_live_auth(store_path)?;
     let base_summaries = account_summaries(&store);
     let target_indices = resolve_account_indices(&store, &base_summaries, account_ref, true)?;
     let refresh_lock = Arc::new(Mutex::new(()));
@@ -636,50 +644,93 @@ async fn refresh_one_account_usage(
         return;
     }
 
-    if auth::auth_tokens_need_refresh(&account.auth_json) {
+    // Codex 在 switch 之后会自己轮换 refresh token。先收回那份新凭证，
+    // 不要用账号库里的旧 refresh token 再请求一次，否则两份登录都会失效。
+    if let Some(adopted) =
+        auth::newer_live_auth_for_account(&account.account_key(), &account.auth_json)
+    {
+        account.auth_json = adopted;
+        account.auth_refresh_blocked = false;
+        account.auth_refresh_error = None;
+    }
+
+    if let Err(error) = record_account_usage(account, now).await {
+        if !usage_error_needs_token_refresh(&error) {
+            account.usage_error = Some(normalize_cli_usage_error(&error));
+            account.updated_at = now;
+            return;
+        }
+        if let Some(adopted) =
+            auth::newer_live_auth_for_account(&account.account_key(), &account.auth_json)
+        {
+            account.auth_json = adopted;
+            account.auth_refresh_blocked = false;
+            account.auth_refresh_error = None;
+            if let Err(retry_error) = record_account_usage(account, now).await {
+                account.usage_error = Some(normalize_cli_usage_error(&retry_error));
+                account.updated_at = now;
+            }
+            return;
+        }
+
         match auth::refresh_chatgpt_auth_tokens_serialized(&account.auth_json, refresh_lock).await {
             Ok(refreshed) => {
                 account.auth_json = refreshed;
                 account.auth_refresh_blocked = false;
                 account.auth_refresh_error = None;
+                if auth::current_auth_account_key().as_deref()
+                    == Some(account.account_key().as_str())
+                {
+                    if let Err(write_error) = auth::write_active_codex_auth(&account.auth_json) {
+                        account.usage_error = Some(format!(
+                            "已刷新登录令牌，但写回当前 Codex 登录失败: {write_error}"
+                        ));
+                        account.updated_at = now;
+                        return;
+                    }
+                }
             }
             Err(error) => {
-                let message = normalize_cli_usage_error(&error);
-                account.usage_error = Some(message.clone());
-                if is_cli_auth_expired_error(&error) {
-                    account.auth_refresh_blocked = true;
-                    account.auth_refresh_error = Some(message);
+                if let Some(adopted) =
+                    auth::newer_live_auth_for_account(&account.account_key(), &account.auth_json)
+                {
+                    account.auth_json = adopted;
+                    account.auth_refresh_blocked = false;
+                    account.auth_refresh_error = None;
+                } else {
+                    let message = normalize_cli_usage_error(&error);
+                    account.usage_error = Some(message.clone());
+                    if is_cli_auth_expired_error(&error) {
+                        account.auth_refresh_blocked = true;
+                        account.auth_refresh_error = Some(message);
+                    }
+                    account.updated_at = now;
+                    return;
                 }
-                account.updated_at = now;
-                return;
             }
         }
-    }
 
-    match auth::extract_auth(&account.auth_json) {
-        Ok(extracted) => {
-            account.email = extracted.email.or_else(|| account.email.clone());
-            account.plan_type = extracted.plan_type.or_else(|| account.plan_type.clone());
-            match usage::fetch_usage_snapshot(&extracted.access_token, &extracted.account_id).await
-            {
-                Ok(snapshot) => {
-                    account.plan_type = snapshot
-                        .plan_type
-                        .clone()
-                        .or_else(|| account.plan_type.clone());
-                    account.usage = Some(snapshot);
-                    account.usage_error = None;
-                }
-                Err(error) => {
-                    account.usage_error = Some(normalize_cli_usage_error(&error));
-                }
-            }
-        }
-        Err(error) => {
-            account.usage_error = Some(normalize_cli_usage_error(&error));
+        if let Err(retry_error) = record_account_usage(account, now).await {
+            account.usage_error = Some(normalize_cli_usage_error(&retry_error));
+            account.updated_at = now;
         }
     }
+}
+
+async fn record_account_usage(account: &mut StoredAccount, now: i64) -> Result<(), String> {
+    let extracted = auth::extract_auth(&account.auth_json)?;
+    account.email = extracted.email.or_else(|| account.email.clone());
+    account.plan_type = extracted.plan_type.or_else(|| account.plan_type.clone());
+    let snapshot =
+        usage::fetch_usage_snapshot(&extracted.access_token, &extracted.account_id).await?;
+    account.plan_type = snapshot
+        .plan_type
+        .clone()
+        .or_else(|| account.plan_type.clone());
+    account.usage = Some(snapshot);
+    account.usage_error = None;
     account.updated_at = now;
+    Ok(())
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf, String> {
@@ -1699,6 +1750,15 @@ fn normalize_cli_usage_error(raw_error: &str) -> String {
     raw_error.to_string()
 }
 
+fn usage_error_needs_token_refresh(raw_error: &str) -> bool {
+    let normalized = raw_error.to_ascii_lowercase();
+    normalized.contains("401")
+        || normalized.contains("unauthorized")
+        || normalized.contains("invalid_token")
+        || normalized.contains("provided authentication token is expired")
+        || normalized.contains("token is expired")
+}
+
 fn is_cli_auth_expired_error(raw_error: &str) -> bool {
     let normalized = raw_error.to_ascii_lowercase();
     (normalized.contains("invalid_grant")
@@ -1737,6 +1797,20 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
     use uuid::Uuid;
+
+    #[test]
+    fn usage_auth_failure_is_the_only_reason_to_refresh_a_stored_token() {
+        assert!(super::usage_error_needs_token_refresh(
+            "请求用量接口失败: 401 Unauthorized"
+        ));
+        assert!(super::usage_error_needs_token_refresh(
+            "provided authentication token is expired"
+        ));
+        assert!(!super::usage_error_needs_token_refresh(
+            "请求用量接口失败: 500 Internal Server Error"
+        ));
+        assert!(!super::usage_error_needs_token_refresh("timed out"));
+    }
 
     #[test]
     fn listening_app_server_match_ignores_the_pid_update_loop_and_terminal_ui() {

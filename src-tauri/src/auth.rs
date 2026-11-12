@@ -614,6 +614,17 @@ pub(crate) fn auth_last_refresh_unix_seconds(auth_json: &Value) -> Option<i64> {
         .and_then(last_refresh_unix_seconds)
 }
 
+/// 本机 Codex 已经轮换过同一账号时，返回那份更新后的 auth.json。
+/// 调用方应直接采用它，而不是再用旧 refresh token 去请求刷新。
+pub(crate) fn newer_live_auth_for_account(account_key: &str, stored_auth: &Value) -> Option<Value> {
+    let live = read_current_codex_auth_optional().ok().flatten()?;
+    let live_key = auth_account_key(&live)?;
+    if live_key != account_key {
+        return None;
+    }
+    has_newer_auth_refresh_snapshot(&live, stored_auth).then_some(live)
+}
+
 pub(crate) fn has_newer_auth_refresh_snapshot(candidate: &Value, reference: &Value) -> bool {
     let candidate_refresh_token = auth_token_object(candidate)
         .and_then(|tokens| tokens.get("refresh_token"))
@@ -820,6 +831,7 @@ pub(crate) fn auth_tokens_need_refresh(auth_json: &Value) -> bool {
     auth_tokens_expire_within(auth_json, 60)
 }
 
+#[cfg(test)]
 pub(crate) fn auth_tokens_need_keepalive_refresh(
     auth_json: &Value,
     token_lead_time_secs: i64,

@@ -29,7 +29,6 @@ use crate::app_paths;
 use crate::auth::account_group_key;
 use crate::auth::account_variant_key;
 use crate::auth::auth_last_refresh_unix_seconds;
-use crate::auth::auth_tokens_need_keepalive_refresh;
 use crate::auth::auth_tokens_need_refresh;
 use crate::auth::current_auth_account_key;
 use crate::auth::current_auth_variant_key;
@@ -82,10 +81,9 @@ const AUTH_EXPIRED_NOTICE: &str = "保存的授权快照已失效，请重新登
 const USAGE_AUTH_TOKEN_EXPIRED_NOTICE: &str =
     "用量刷新失败：登录令牌已过期，请刷新用量或切换账号重新校验。";
 const EXPORT_ARCHIVE_ENTRY_NAME: &str = "accounts.json";
-const KEEPALIVE_REFRESH_WINDOW_SECS: i64 = 10 * 60;
-// 对齐 Codex 官方客户端的刷新模型：不要每隔几小时刷新一次 refresh_token。
-// 不同账号按稳定 hash 分布在 7-8 天窗口内刷新，避免同一批导入账号集中打到刷新端点。
+#[cfg(test)]
 const KEEPALIVE_LAST_REFRESH_BASE_AGE_SECS: i64 = 7 * 24 * 60 * 60;
+#[cfg(test)]
 const KEEPALIVE_LAST_REFRESH_JITTER_SECS: i64 = 24 * 60 * 60;
 const PLAN_CHANGE_AUTH_REFRESH_COOLDOWN_SECS: i64 = 15 * 60;
 const PENDING_AUTH_OPERATION_MESSAGE: &str = "已有账号授权流程正在进行，请先完成或取消后再操作。";
@@ -1039,6 +1037,7 @@ fn resolve_usage_first_plan_type(
         .or(fallback_plan_type)
 }
 
+#[cfg(test)]
 fn keepalive_max_last_refresh_age_secs(account_key: &str) -> i64 {
     if KEEPALIVE_LAST_REFRESH_JITTER_SECS <= 0 {
         return KEEPALIVE_LAST_REFRESH_BASE_AGE_SECS;
@@ -1287,49 +1286,18 @@ async fn refresh_usage_for_target(
     let mut auth_refresh_blocked = target.auth_refresh_blocked;
     let mut auth_refresh_error = target.auth_refresh_error.clone();
 
-    if force_auth_refresh {
-        let latest_auth_json =
-            refresh_latest_auth_json_if_newer(app, state, &target.account_key, &working_auth_json)
-                .await;
-        if latest_auth_json != working_auth_json {
-            working_auth_json = latest_auth_json;
-            auth_refreshed = true;
-            auth_refresh_blocked = false;
-            auth_refresh_error = None;
-        }
-    }
-
-    if force_auth_refresh
-        && !auth_refresh_blocked
-        && auth_tokens_need_keepalive_refresh(
-            &working_auth_json,
-            KEEPALIVE_REFRESH_WINDOW_SECS,
-            keepalive_max_last_refresh_age_secs(&target.account_key),
-        )
-    {
-        match refresh_account_auth_with_operation_guard(
-            app,
-            state,
-            &target.account_key,
-            &working_auth_json,
-        )
-        .await
-        {
-            Ok(success) => {
-                working_auth_json = success.auth_json;
-                auth_refreshed = true;
-                auth_refresh_blocked = false;
-                auth_refresh_error = None;
-                if let Some(err) = success.persist_error {
-                    refresh_error = Some(err);
-                }
-            }
-            Err(failure) => {
-                auth_refresh_blocked = failure.auth_refresh_blocked;
-                auth_refresh_error = failure.auth_refresh_error;
-                refresh_error = failure.refresh_error;
-            }
-        }
+    // 和 Token Monitor 一样，先用现有 access token 读用量。
+    // 本机 Codex 若已在 ctc switch 之后轮换过同一账号，采用那份快照。
+    // 不因为 access token 临近过期或 last_refresh 较旧就请求刷新，
+    // 否则新的 refresh token 会使其他登录副本失效，只能重新复制凭证。
+    let latest_auth_json =
+        refresh_latest_auth_json_if_newer(app, state, &target.account_key, &working_auth_json)
+            .await;
+    if latest_auth_json != working_auth_json {
+        working_auth_json = latest_auth_json;
+        auth_refreshed = true;
+        auth_refresh_blocked = false;
+        auth_refresh_error = None;
     }
 
     let mut extracted = extract_auth(&working_auth_json);
@@ -1536,18 +1504,16 @@ async fn persist_account_refresh_state(
 fn should_retry_with_token_refresh(
     fetch_result: &Result<crate::models::UsageSnapshot, String>,
 ) -> bool {
-    match fetch_result {
-        Ok(snapshot) => snapshot.plan_type.is_none(),
-        Err(err) => {
-            let normalized = err.to_ascii_lowercase();
-            normalized.contains("401")
-                || normalized.contains("unauthorized")
-                || normalized.contains("invalid_token")
-                || normalized.contains("provided authentication token is expired")
-                || normalized.contains("token is expired")
-                || normalized.contains("deactivated_workspace")
-        }
-    }
+    let Err(err) = fetch_result else {
+        return false;
+    };
+    let normalized = err.to_ascii_lowercase();
+    normalized.contains("401")
+        || normalized.contains("unauthorized")
+        || normalized.contains("invalid_token")
+        || normalized.contains("provided authentication token is expired")
+        || normalized.contains("token is expired")
+        || normalized.contains("deactivated_workspace")
 }
 
 fn should_suspend_auth_keepalive(raw_error: &str) -> bool {
