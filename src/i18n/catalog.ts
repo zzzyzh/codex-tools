@@ -1,3 +1,4 @@
+import type { LocalProjectCopy } from "../utils/localProjectSwitch";
 import enUsRaw from "./locales/en-US.json";
 import jaJpRaw from "./locales/ja-JP.json";
 import koKrRaw from "./locales/ko-KR.json";
@@ -51,6 +52,7 @@ export function getNextLocale(current: AppLocale): AppLocale {
 }
 
 export type MessageCatalog = {
+  localProjects: LocalProjectCopy;
   common: {
     close: string;
     clear: string;
@@ -118,13 +120,10 @@ export type MessageCatalog = {
     startButton: string;
     dialogAriaLabel: string;
     dialogTitle: string;
-    dialogSubtitle: string;
     reauthorizeDialogTitle: string;
     reauthorizeDialogSubtitle: (label: string) => string;
     tabsAriaLabel: string;
     oauthTab: string;
-    oauthDescription: string;
-    reauthorizeOauthDescription: string;
     oauthLinkLabel: string;
     oauthOpenBrowser: string;
     oauthListening: string;
@@ -161,7 +160,6 @@ export type MessageCatalog = {
     apiModelLabel: string;
     apiModelPlaceholder: string;
     apiValidationTitle: string;
-    apiValidationDescription: string;
     apiValidationFailed: string;
     apiTestConnection: string;
     apiTestingConnection: string;
@@ -243,9 +241,7 @@ export type MessageCatalog = {
     settings: string;
   };
   analytics: {
-    kicker: string;
     title: string;
-    description: string;
     refresh: string;
     exportCsv: string;
     exportJson: string;
@@ -263,15 +259,11 @@ export type MessageCatalog = {
     totalTokens: string;
     sessions: string;
     projectsTitle: string;
-    projectsDescription: string;
     sessionsTitle: string;
-    sessionsDescription: string;
     heatmapTitle: string;
-    heatmapDescription: string;
     heatmapAriaLabel: string;
     heatmapTooltip: (weekday: string, time: string, tokens: string) => string;
     topPromptsTitle: string;
-    topPromptsDescription: string;
     budgetTitle: string;
     budgetDescription: string;
     budgetInputLabel: string;
@@ -329,6 +321,11 @@ export type MessageCatalog = {
     chartExporting: string;
     loadBalanceLabel: string;
     loadBalanceAverage: string;
+    loadBalancePriority: string;
+    priorityDescription: string;
+    accountOrderLabel: string;
+    moveUp: string;
+    moveDown: string;
     loadBalanceSequential: string;
     sequentialFiveHourLimitLabel: string;
     sequentialFiveHourLimitDescription: string;
@@ -336,7 +333,6 @@ export type MessageCatalog = {
     modelMenuDescription: string;
     modelMenuOpen: string;
     modelMenuTitle: string;
-    modelMenuDialogDescription: string;
     modelMenuEnableAll: string;
     modelMenuDisableAll: string;
     modelMenuCancel: string;
@@ -382,11 +378,9 @@ export type MessageCatalog = {
     apiKeyPlaceholder: string;
     activeAccountLabel: string;
     activeAccountEmptyTitle: string;
-    activeAccountEmptyDescription: string;
     lastErrorLabel: string;
     none: string;
     keyManagerTitle: string;
-    keyManagerDescription: string;
     keyManagerHelpLabel: string;
     keyManagerHelp: string;
     keyCreateNamePlaceholder: string;
@@ -427,9 +421,7 @@ export type MessageCatalog = {
     serviceTierDefault: string;
     serviceTierFast: string;
     serviceTierFlex: string;
-    remoteKicker: string;
     remoteTitle: string;
-    remoteDescription: string;
     remoteHistoryTitle: string;
     remoteAddServer: string;
     remoteExpand: string;
@@ -507,19 +499,13 @@ export type MessageCatalog = {
     cloudflaredDescription: string;
     cloudflaredToggle: string;
     startLocalProxyFirstTitle: string;
-    startLocalProxyFirstDescription: string;
-    notInstalledLabel: string;
     installTitle: string;
-    installDescription: string;
     installing: string;
     installButton: string;
     quickModeLabel: string;
-    quickModeTitle: string;
     quickModeDescription: string;
     namedModeLabel: string;
-    namedModeTitle: string;
     namedModeDescription: string;
-    quickNoteTitle: string;
     quickNoteBody: string;
     apiTokenLabel: string;
     apiTokenPlaceholder: string;
@@ -538,12 +524,11 @@ export type MessageCatalog = {
     publicStatusLabel: string;
     publicStatusRunning: string;
     publicStatusStopped: string;
-    publicStatusRunningDescription: string;
-    publicStatusStoppedDescription: string;
     publicUrlLabel: string;
     installPathLabel: string;
     notDetected: string;
   };
+  resetCredit: { use: string; confirm: string; confirmUse: string; submitting: string; reset: string; nothingToReset: string; noCredit: string; alreadyRedeemed: string; unknown: string; refreshFailed: string; };
   settings: {
     dialogAriaLabel: string;
     title: string;
@@ -563,12 +548,22 @@ export type MessageCatalog = {
       description: string;
       accountsLabel: string;
       noAccounts: string;
+      scheduleLabel: string;
+      scheduleDescription: string;
+      startTime: string;
+      endTime: string;
     };
     launchCodexAfterSwitch: {
       label: string;
       description: string;
       checkedText: string;
       uncheckedText: string;
+    };
+    preserveLocalProjects: {
+      label: string;
+      checkedText: string;
+      uncheckedText: string;
+      description: string;
     };
     smartSwitchIncludeApi: {
       label: string;
@@ -605,6 +600,7 @@ export type MessageCatalog = {
       description: string;
     };
     noSupportedEditors: string;
+    proxyPoolDisplay: { label: string; description: string; };
     trayUsageDisplay: {
       label: string;
       description: string;
@@ -637,7 +633,6 @@ export type MessageCatalog = {
     };
     macosQuotaOnboardingPreview: {
       label: string;
-      description: string;
       open: string;
     };
     windowsTaskbarWidget: {
@@ -694,6 +689,8 @@ export type MessageCatalog = {
     settingsUpdated: string;
     updateSettingsFailed: (error: string) => string;
     usageRefreshed: string;
+    usageRefreshPartial: (failed: number, total: number, error: string) => string;
+    usageRefreshAllFailed: (total: number, error: string) => string;
     refreshFailed: (error: string) => string;
     accountWarmupActivated: string;
     accountWarmupRequestSent: string;
@@ -828,6 +825,7 @@ function fillTemplate(
 
 function compileLocale(raw: RawMessageCatalog): MessageCatalog {
   return {
+    localProjects: raw.localProjects,
     common: raw.common,
     topBar: {
       ...raw.topBar,
@@ -885,6 +883,7 @@ function compileLocale(raw: RawMessageCatalog): MessageCatalog {
         fillTemplate(raw.apiProxy.remoteDeployProgressTitle, { label }),
     },
     settings: raw.settings,
+    resetCredit: raw.resetCredit,
     editorPicker: raw.editorPicker,
     editorAppLabels: raw.editorAppLabels,
     updateDialog: {
@@ -901,6 +900,10 @@ function compileLocale(raw: RawMessageCatalog): MessageCatalog {
         fillTemplate(raw.notices.updateSettingsFailed, { error }),
       refreshFailed: (error) =>
         fillTemplate(raw.notices.refreshFailed, { error }),
+      usageRefreshPartial: (failed, total, error) =>
+        fillTemplate(raw.notices.usageRefreshPartial, { failed, total, error }),
+      usageRefreshAllFailed: (total, error) =>
+        fillTemplate(raw.notices.usageRefreshAllFailed, { total, error }),
       accountWarmupFailed: (error) =>
         fillTemplate(raw.notices.accountWarmupFailed, { error }),
       reloginRequired: (label) =>

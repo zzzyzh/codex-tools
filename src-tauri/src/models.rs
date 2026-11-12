@@ -38,6 +38,8 @@ pub(crate) fn normalize_api_proxy_sequential_five_hour_limit_percent(value: f64)
 pub(crate) struct AccountsStore {
     #[serde(default = "default_store_version")]
     pub(crate) version: u8,
+    #[serde(skip)]
+    pub(crate) loaded_revision: crate::store_lock::StoreRevision,
     #[serde(default)]
     pub(crate) accounts: Vec<StoredAccount>,
     #[serde(default)]
@@ -52,6 +54,7 @@ impl Default for AccountsStore {
     fn default() -> Self {
         Self {
             version: default_store_version(),
+            loaded_revision: Default::default(),
             accounts: Vec::new(),
             settings: AppSettings::default(),
         }
@@ -264,8 +267,20 @@ pub(crate) struct ResetCreditsSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ResetCredit {
+    pub(crate) id: Option<String>,
+    pub(crate) status: Option<String>,
     pub(crate) granted_at: Option<i64>,
     pub(crate) expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PreservationResult {
+    pub status: String,
+    pub project_count: usize,
+    pub thread_link_count: usize,
+    pub unassigned_thread_count: usize,
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -283,6 +298,7 @@ pub(crate) struct SwitchAccountResult {
     pub(crate) restarted_editor_apps: Vec<EditorAppId>,
     pub(crate) editor_restart_error: Option<String>,
     pub(crate) provider_sync_error: Option<String>,
+    pub(crate) local_project_preservation: Option<PreservationResult>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -502,6 +518,7 @@ pub(crate) enum ApiProxyLoadBalanceMode {
     #[default]
     Average,
     Sequential,
+    Priority,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -687,6 +704,7 @@ pub(crate) struct AppSettings {
     pub(crate) tray_usage_display_mode: TrayUsageDisplayMode,
     #[serde(default)]
     pub(crate) tray_usage_title_show_window_labels: bool,
+    pub(crate) macos_tray_proxy_pool: bool,
     #[serde(default)]
     pub(crate) macos_tray_text_icon_style: MacosTrayTextIconStyle,
     #[serde(default)]
@@ -705,6 +723,7 @@ pub(crate) struct AppSettings {
     #[serde(default)]
     pub(crate) macos_quota_onboarding_completed: bool,
     pub(crate) launch_codex_after_switch: bool,
+    pub(crate) preserve_local_projects: bool,
     #[serde(default)]
     pub(crate) smart_switch_include_api: bool,
     #[serde(default)]
@@ -721,12 +740,17 @@ pub(crate) struct AppSettings {
     pub(crate) api_proxy_port: u16,
     #[serde(default)]
     pub(crate) api_proxy_load_balance_mode: ApiProxyLoadBalanceMode,
+    pub(crate) account_order: Vec<String>,
+    pub(crate) reset_credit_requests: HashMap<String, String>,
     #[serde(default = "default_api_proxy_sequential_five_hour_limit_percent")]
     pub(crate) api_proxy_sequential_five_hour_limit_percent: f64,
     #[serde(default)]
     pub(crate) api_proxy_disabled_models: Vec<String>,
     #[serde(default)]
     pub(crate) auto_account_warmup_enabled: bool,
+    pub(crate) auto_account_warmup_schedule_enabled: bool,
+    pub(crate) auto_account_warmup_start_minute: u16,
+    pub(crate) auto_account_warmup_end_minute: u16,
     #[serde(default)]
     pub(crate) auto_account_warmup_account_ids: Vec<String>,
     #[serde(default)]
@@ -747,6 +771,7 @@ impl Default for AppSettings {
             launch_at_startup: false,
             tray_usage_display_mode: TrayUsageDisplayMode::OneWeekRemaining,
             tray_usage_title_show_window_labels: false,
+            macos_tray_proxy_pool: false,
             macos_tray_text_icon_style: MacosTrayTextIconStyle::CodexTools,
             windows_tray_icon_style: WindowsTrayIconStyle::GradientNumberPlate,
             tray_quota_icon_visible: true,
@@ -755,6 +780,7 @@ impl Default for AppSettings {
             windows_quota_onboarding_completed: false,
             macos_quota_onboarding_completed: false,
             launch_codex_after_switch: true,
+            preserve_local_projects: true,
             smart_switch_include_api: false,
             launch_codex_as_admin: false,
             codex_launch_path: None,
@@ -766,10 +792,15 @@ impl Default for AppSettings {
             auto_start_api_proxy: false,
             api_proxy_port: default_api_proxy_port(),
             api_proxy_load_balance_mode: ApiProxyLoadBalanceMode::default(),
+            account_order: Vec::new(),
+            reset_credit_requests: HashMap::new(),
             api_proxy_sequential_five_hour_limit_percent:
                 default_api_proxy_sequential_five_hour_limit_percent(),
             api_proxy_disabled_models: Vec::new(),
             auto_account_warmup_enabled: false,
+            auto_account_warmup_schedule_enabled: false,
+            auto_account_warmup_start_minute: 360,
+            auto_account_warmup_end_minute: 1320,
             auto_account_warmup_account_ids: Vec::new(),
             account_warmup_attempts: HashMap::new(),
             codex_analytics_weekly_budget_usd: None,
@@ -788,6 +819,7 @@ pub(crate) struct AppSettingsPatch {
     pub(crate) launch_at_startup: Option<bool>,
     pub(crate) tray_usage_display_mode: Option<TrayUsageDisplayMode>,
     pub(crate) tray_usage_title_show_window_labels: Option<bool>,
+    pub(crate) macos_tray_proxy_pool: Option<bool>,
     pub(crate) macos_tray_text_icon_style: Option<MacosTrayTextIconStyle>,
     pub(crate) windows_tray_icon_style: Option<WindowsTrayIconStyle>,
     #[serde(alias = "macosTrayQuotaIconVisible")]
@@ -797,6 +829,7 @@ pub(crate) struct AppSettingsPatch {
     pub(crate) windows_quota_onboarding_completed: Option<bool>,
     pub(crate) macos_quota_onboarding_completed: Option<bool>,
     pub(crate) launch_codex_after_switch: Option<bool>,
+    pub(crate) preserve_local_projects: Option<bool>,
     pub(crate) smart_switch_include_api: Option<bool>,
     pub(crate) launch_codex_as_admin: Option<bool>,
     pub(crate) codex_launch_path: Option<Option<String>>,
@@ -807,9 +840,13 @@ pub(crate) struct AppSettingsPatch {
     pub(crate) auto_start_api_proxy: Option<bool>,
     pub(crate) api_proxy_port: Option<u16>,
     pub(crate) api_proxy_load_balance_mode: Option<ApiProxyLoadBalanceMode>,
+    pub(crate) account_order: Option<Vec<String>>,
     pub(crate) api_proxy_sequential_five_hour_limit_percent: Option<f64>,
     pub(crate) api_proxy_disabled_models: Option<Vec<String>>,
     pub(crate) auto_account_warmup_enabled: Option<bool>,
+    pub(crate) auto_account_warmup_schedule_enabled: Option<bool>,
+    pub(crate) auto_account_warmup_start_minute: Option<u16>,
+    pub(crate) auto_account_warmup_end_minute: Option<u16>,
     pub(crate) auto_account_warmup_account_ids: Option<Vec<String>>,
     pub(crate) codex_analytics_weekly_budget_usd: Option<Option<f64>>,
     pub(crate) remote_servers: Option<Vec<RemoteServerConfig>>,

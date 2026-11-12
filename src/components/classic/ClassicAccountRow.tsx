@@ -1,18 +1,15 @@
+import { PlanStamp } from "./PlanStamp";
+import { Switch } from "../ui/Switch";
+import { AccountListRow } from "../ui/AccountListRow";
 import type { AccountRow } from "../accounts/types";
 import { formatPlan, planTone } from "../../utils/usage";
-import { formatFullDate } from "../../utils/dateFormatting";
-import {
-  accountInitial,
-  displayAccountAddress,
-  formatResetValue,
-} from "../accounts/accountPresentation";
+import { displayAccountAddress } from "../accounts/accountPresentation";
 import { accountIssueReason, accountStatus } from "../accounts/accountModel";
 import { statusLabel } from "../accounts/accountCopy";
 import { UsageFreshnessBadge } from "../accounts/UsageFreshnessBadge";
 import { AccountActionMenu } from "../accounts/AccountActionMenu";
-import { AccountResetCredits } from "../accounts/AccountResetCredits";
+import { AccountRowMetrics } from "./AccountRowMetrics";
 import { UsageMeter } from "./ClassicUsageMeter";
-import { copyAccountText } from "./copyAccountText";
 import type { ClassicAccountsWorkspace } from "./useClassicAccounts";
 export function ClassicAccountRow({
   workspace,
@@ -39,36 +36,18 @@ export function ClassicAccountRow({
   const actions = workspace.actions;
   const account = row.account;
   const status = accountStatus(account);
-  const normalizedPlan = account.planType || account.usage?.planType;
-  const isSelected = selectedRow?.account.id === account.id;
+  const isSelected = workspace.inspectorOpen && selectedRow?.account.id === account.id;
   const isSwitching = switchingId === account.id;
   const switchDisabled = authBusy || account.isCurrent;
   const accountAddress = displayAccountAddress(account, text.emptyValue);
   const issueReason = accountIssueReason(account, text.issueFallbackReason);
   return (
-    <article
-      key={row.id}
-      className={`accountRow status-${status}${isSelected ? " isSelected" : ""}${account.isCurrent ? " isCurrent" : ""}`}
-      aria-current={account.isCurrent ? "true" : undefined}
-      role="button"
-      tabIndex={0}
-      onClick={() => selectAccount(account.id)}
-      onKeyDown={(event) => {
-        if (
-          event.target === event.currentTarget &&
-          (event.key === "Enter" || event.key === " ")
-        ) {
-          event.preventDefault();
-          selectAccount(account.id);
-        }
-      }}
-    >
+    <AccountListRow current={account.isCurrent} selected={isSelected} status={status} onInspect={() => selectAccount(account.id)}>
       <div className="accountIdentityCell">
-        <span className={`accountAvatar tone-${planTone(normalizedPlan)}`}>
-          {accountInitial(account)}
-        </span>
+
         <span className="accountIdentityText">
           <span className="accountTitleLine">
+            <span className="accountPlanBadges">
             {row.variants.map((variant) => {
               const plan = formatPlan(
                 variant.planType || variant.usage?.planType,
@@ -80,49 +59,41 @@ export function ClassicAccountRow({
                 <button
                   key={variant.id}
                   type="button"
-                  className={`planChip tone-${planTone(variant.planType || variant.usage?.planType)}${
+                  className={`planChip accountPlanStamp tone-${planTone(variant.planType || variant.usage?.planType)}${
                     isVariantSelected ? " isSelected" : ""
                   }`}
                   onClick={(event) => {
                     event.stopPropagation();
                     selectVariant(row.id, variant);
                   }}
+                  aria-label={plan}
+                  title={plan}
                   aria-pressed={isVariantSelected}
                 >
-                  {plan}
+                  <PlanStamp label={plan} />
                 </button>
               );
             })}
+            </span>
             <button
               type="button"
               className="accountNameButton"
               title={accountAddress}
               onClick={(event) => {
                 event.stopPropagation();
-                copyAccountText(accountAddress);
+                selectAccount(account.id);
               }}
             >
               {account.label || accountAddress}
             </button>
           </span>
           <span className="accountStateLine">
-            <span
-              className={`statusText status-${status}`}
-              title={
-                status === "issue"
-                  ? (issueReason ?? text.issueFallbackReason)
-                  : statusLabel(status, text)
-              }
-            >
-              <span className="statusDot" />
-              <span className="statusLabel">{statusLabel(status, text)}</span>
-              {status === "issue" ? (
-                <span className="statusReason">
-                  {issueReason ?? text.issueFallbackReason}
-                </span>
-              ) : null}
-            </span>
-            <AccountResetCredits account={account} text={text} />
+            <AccountRowMetrics account={account} usage={workspace.tokenUsageByAccount.get(account.accountId)} locale={locale} text={text} />
+              <span className={`statusText status-${status}`} role="img"
+                aria-label={statusLabel(status, text)}
+                title={status === "issue" ? (issueReason ?? text.issueFallbackReason) : statusLabel(status, text)}>
+                <span className="statusDot" />
+              </span>
             <UsageFreshnessBadge
               account={account}
               refreshing={usageRefreshing}
@@ -140,6 +111,7 @@ export function ClassicAccountRow({
         windowLabel="5h"
         window={account.usage?.fiveHour ?? null}
         text={text}
+        locale={locale}
       />
       <UsageMeter
         className="accountUsageWeek"
@@ -147,47 +119,14 @@ export function ClassicAccountRow({
         windowLabel="1w"
         window={account.usage?.oneWeek ?? null}
         text={text}
+        locale={locale}
       />
-      <div className="resetCell">
-        <span
-          title={formatFullDate(
-            account.usage?.fiveHour?.resetAt,
-            locale,
-            text.emptyValue,
-          )}
-        >
-          {formatResetValue(
-            account.usage?.fiveHour?.resetAt,
-            locale,
-            text.emptyValue,
-          )}
-        </span>
-        <strong
-          title={formatFullDate(
-            account.usage?.oneWeek?.resetAt,
-            locale,
-            text.emptyValue,
-          )}
-        >
-          {formatResetValue(
-            account.usage?.oneWeek?.resetAt,
-            locale,
-            text.emptyValue,
-          )}
-        </strong>
+      <div className="accountProxyControl" onClick={event => event.stopPropagation()}>
+        <span>API</span>
+        <Switch checked={account.apiProxyEnabled} disabled={authBusy}
+          label={copy.accountCard.apiProxyToggle}
+          onChange={checked => { void onToggleApiProxy(account, checked); }} />
       </div>
-      <label className="rowToggle" onClick={(event) => event.stopPropagation()}>
-        <input
-          type="checkbox"
-          checked={account.apiProxyEnabled}
-          disabled={authBusy}
-          onChange={(event) => {
-            void onToggleApiProxy(account, event.currentTarget.checked);
-          }}
-          aria-label={copy.accountCard.apiProxyToggle}
-        />
-        <span />
-      </label>
       <div className="rowActions" onClick={(event) => event.stopPropagation()}>
         <button
           type="button"
@@ -211,6 +150,6 @@ export function ClassicAccountRow({
           onInspect={() => selectAccount(account.id)}
         />
       </div>
-    </article>
+    </AccountListRow>
   );
 }

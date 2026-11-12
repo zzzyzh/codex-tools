@@ -1,4 +1,6 @@
-import { useAppLayout } from "../../hooks/useAppLayout";
+import { ActionMenu } from "../ui/ActionMenu";
+import { uiCopy } from "../../i18n/uiCopy";
+import { Switch } from "../ui/Switch";
 import { getPageLayoutCopy } from "../../i18n/pageLayoutCopy";
 import { copyText } from "./clipboard";
 import { ProxyHelpTip } from "./ProxyHelpTip";
@@ -8,7 +10,6 @@ import {
 } from "./keyPolicy";
 import type { ApiProxyWorkspace } from "./useApiProxyWorkspace";
 export function ProxyKeys({ workspace }: { workspace: ApiProxyWorkspace }) {
-  const { layout } = useAppLayout();
   const {
     apiProxyKeys,
     apiProxyKeyLogs,
@@ -46,7 +47,6 @@ export function ProxyKeys({ workspace }: { workspace: ApiProxyWorkspace }) {
             </ProxyHelpTip>
           </div>
           <strong>{apiProxyKeys.length}</strong>
-          <p>{proxyCopy.keyManagerDescription}</p>
         </div>
         <div className="proxyKeyCreateRow">
           <input
@@ -124,30 +124,15 @@ export function ProxyKeys({ workspace }: { workspace: ApiProxyWorkspace }) {
                       }}
                     />
                   </label>
-                  <label
-                    className="themeSwitch"
-                    aria-label={proxyCopy.keyToggleAria}
-                  >
-                    <input
-                      type="checkbox"
+                  <Switch label={proxyCopy.keyToggleAria}
                       checked={key.enabled}
                       disabled={savingApiProxyKey}
-                      onChange={(event) =>
+                      onChange={(checked) =>
                         void onUpdateApiProxyKey({
                           id: key.id,
-                          enabled: event.currentTarget.checked,
+                          enabled: checked,
                         })
-                      }
-                    />
-                    <span className="themeSwitchTrack" aria-hidden="true">
-                      <span className="themeSwitchThumb" />
-                    </span>
-                    <span className="themeSwitchText">
-                      {key.enabled
-                        ? proxyCopy.keyEnabled
-                        : proxyCopy.keyDisabled}
-                    </span>
-                  </label>
+                      } />
                   <button
                     type="button"
                     className="ghost proxyCopyButton"
@@ -156,14 +141,7 @@ export function ProxyKeys({ workspace }: { workspace: ApiProxyWorkspace }) {
                   >
                     {proxyCopy.keyRegenerate}
                   </button>
-                  <button
-                    type="button"
-                    className="danger"
-                    disabled={savingApiProxyKey || apiProxyKeys.length <= 1}
-                    onClick={() => void onDeleteApiProxyKey(key.id)}
-                  >
-                    {proxyCopy.keyDelete}
-                  </button>
+                  <ActionMenu label={`${key.label} · ${uiCopy(locale).more}`} items={[{ label: proxyCopy.keyDelete, danger: true, disabled: savingApiProxyKey || apiProxyKeys.length <= 1, action: () => void onDeleteApiProxyKey(key.id) }]} />
                 </div>
 
                 <div className="proxyKeySecretRow">
@@ -199,7 +177,7 @@ export function ProxyKeys({ workspace }: { workspace: ApiProxyWorkspace }) {
 
                 <details
                   className="proxyKeyDetails"
-                  open={layout === "classic" ? true : undefined}
+                  open
                 >
                   <summary>{getPageLayoutCopy(locale).keyDetails}</summary>
                   <div>

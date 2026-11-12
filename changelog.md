@@ -1,8 +1,134 @@
 ## 更新日志 / Changelog
 
-### Unreleased
-
 ### Released
+
+- v3.2.1
+
+#### English
+
+1. Continue desktop account switching when local session sync fails, and show that the session was not synced. Interrupted transactions still require recovery.
+2. Log the failing file, operation, JSON position and filesystem error without including credential contents.
+3. Desktop release for macOS and Windows. npm CLI packages are not published in this release.
+
+#### 中文
+
+1. 本地会话同步失败时继续切换桌面账号，并提示会话未同步；中断的事务仍需先恢复。
+2. 补充失败文件、操作阶段、JSON 解析位置和文件系统错误日志，不记录凭证内容。
+3. 本次发布 macOS 与 Windows 桌面安装包，不发布 npm CLI 包。
+
+- v3.2.0
+
+#### English
+
+1. Add Claude account management, OAuth and credential import, usage refresh and session maintenance, with a choice of app for authorization links.
+2. Preserve local workspaces when switching accounts and improve project/session recovery and switch input handling.
+3. Unify account, analytics, proxy, settings and dialog layouts; add responsive account details, consistent controls and concise operation feedback.
+4. Refine account rows with colored plan stamps, credit balances and 24-hour token usage. Keep large layouts stationary and use short transitions only for overlays and feedback.
+5. Desktop release for macOS and Windows. npm CLI packages are not published in this release.
+
+#### 中文
+
+1. 新增 Claude 账号管理、OAuth 与凭据导入、用量刷新和会话维护，授权链接支持选择打开应用。
+2. 完善账号切换时的本地工作区保留、项目与会话恢复，以及切换输入处理。
+3. 统一账号、分析、API 反代、设置及弹窗布局，完善响应式详情面板、公共控件和操作反馈。
+4. 账号行采用彩色套餐标识，集中展示余额和近 24 小时 Token；大面积布局保持静止，仅浮层和提示保留短过渡。
+5. 本次发布 macOS 与 Windows 桌面安装包，不发布 npm CLI 包。
+
+- v3.1.5
+
+#### English
+
+1. Preserve local Codex projects and conversation assignments when switching between local ChatGPT accounts. Enabled by default; existing explicit opt-outs remain unchanged.
+2. Preview project merges and recover interrupted switches without overwriting conflicting external changes.
+3. Keep historical project mappings and stale sidebar records from blocking valid project transfers.
+4. Includes desktop, CLI and TUI integration. This release publishes desktop installers; npm CLI packages are not published.
+
+#### 中文
+
+1. 本地 ChatGPT 账号切换时保留 Codex 项目及对话归属，默认开启，已有明确关闭设置保持不变。
+2. 提供项目合并预览及切换中断恢复，避免覆盖存在冲突的外部修改。
+3. 修复历史项目映射及旧侧栏记录阻止有效项目迁移的问题。
+4. 功能覆盖桌面、CLI 和 TUI。本次发布桌面安装包，暂不发布 npm CLI 包。
+
+- v3.1.4
+
+#### English
+
+1. Report interrupted Responses streams explicitly for both HTTP SSE and WebSocket clients, while preserving partial output and successful completion.
+2. Accept incremental tool catalogs at their original conversation positions in Responses Lite.
+3. Add GPT-6.1 Terra and GPT-Image-2.5 Sunburst/Flare to proxy model controls, and include Terra's native Codex model metadata. Existing Key restrictions remain in effect; upstream account access is still required.
+4. Desktop release only; npm CLI packages are not published in this release.
+
+#### 中文
+
+1. HTTP SSE 和 WebSocket 的 Responses 流中断时返回明确失败，保留已有输出并正确区分正常完成。
+2. 修复 Responses Lite 拒绝会话中增量工具目录的问题，保留工具加入顺序。
+3. 反代模型控制新增 GPT-6.1 Terra、GPT-Image-2.5 Sunburst/Flare，并提供 Terra 的原生 Codex 模型目录。已有 Key 权限不变，仍需上游账号具有相应模型权限。
+4. 本次只发布桌面版本，暂不发布 npm CLI 包。
+
+- v3.1.3
+
+#### English
+
+1. Improve quota refresh reliability and show partial failures clearly.
+2. Remember window size and position, and improve API account and Windows startup compatibility.
+3. Clarify session Token statistics and improve number precision.
+
+#### 中文
+
+1. 提升额度刷新稳定性，明确提示部分账号刷新失败。
+2. 记住窗口大小和位置，改善 API 账号及 Windows 启动兼容性。
+3. 明确会话 Token 统计口径，优化数字精度。
+
+- v3.1.2
+
+#### English
+
+1. Fix image generation failures for ChatGPT accounts using the API proxy.
+2. Use the classic interface throughout and simplify layout settings.
+3. Improve account status, plan labels and usage display.
+
+#### 中文
+
+1. 修复 ChatGPT 账号通过 API 反代生成图片失败的问题。
+2. 统一使用经典界面，简化布局设置。
+3. 优化账号状态、套餐标签和用量展示。
+
+- v3.1.1
+
+#### English
+
+1. Refresh the classic account list, summary cards and detail panel with compact account statistics, clearer plan/status styling and responsive layouts.
+2. Show per-account local Token totals for the last 24 hours, 7 days and 30 days, estimated output speed, last activity and Credits balances. Usage is attributed to the account that created each Codex session; speed is estimated from local log timing, excluding long idle intervals.
+3. Show quota reset times directly in usage meters. Split account details, statistics, recent switches and styles into focused modules while preserving account ordering and reset-credit controls from v3.1.0.
+4. Desktop release only; npm CLI packages are not published in this release.
+
+#### 中文
+
+1. 更新经典账号列表、汇总卡片与详情面板，展示紧凑账号统计，优化套餐、状态样式与响应式布局。
+2. 展示每个账号近 24 小时、7 天和 30 天的本地 Token 用量、估算输出速度、最近使用时间及 Credits 余额。按 Codex 会话创建账号归属用量；速度依据本地日志耗时估算，排除长时间空闲间隔。
+3. 在用量条直接展示额度重置时间；将账号详情、统计、最近切换和样式拆分为独立模块，保留 v3.1.0 的账号排序和重置卡操作。
+4. 本次只发布桌面版本，暂不发布 npm CLI 包。
+
+- v3.1.0
+
+#### English
+
+1. Add account-group ordering and a strict priority proxy strategy (#223). Each request prefers the highest available priority, falls back when quota is exhausted, and returns to recovered accounts. Average and sequential strategies remain available.
+2. Schedule automatic warm-up within a daily local-time window, including overnight periods (#222). Recheck the selected accounts, current settings and time before sending; the application must be running.
+3. Fix manual five-hour activation being skipped after a recent attempt (#226). Manual activation bypasses success and failure cooldowns while retaining active-window, weekly-quota and authorization checks. Automatic warm-up keeps its persisted cooldowns.
+4. Show proxy-pool average quota and valid-account counts in the macOS menu bar (#221). Exclude duplicate, disabled, API, unauthorized and stale accounts; percentages are averages rather than a total token balance.
+5. Redeem a selected reset credit from account details after confirmation (#224). Recheck availability and expiry, persist the request ID, and distinguish redemption from a failed quota refresh. Redemption was validated with a local mock service; no real credit was consumed during testing.
+6. Keep #205 (Luna client failure) and #206 (Windows OpenCode settings visibility) open for current-version native reproduction. Existing protocol and simulated UI checks do not establish that these reports are resolved.
+
+#### 中文
+
+1. 新增账号组排序与独立的优先级反代策略（#223）：每次请求优先选择可用的高优先级账号，额度耗尽后回退，恢复后重新优先使用；保留平均和逐个策略。
+2. 自动预热支持每日系统本地时间范围及跨午夜时段（#222）；发送前重新核对账号选择、最新设置与时间，应用需要保持运行。
+3. 修复手动激活 5h 窗口被近期预热记录拦截的问题（#226）：手动操作绕过成功和失败冷却，仍检查已激活窗口、周额度和授权状态；自动预热继续使用持久化冷却。
+4. macOS 菜单栏可显示代理账号池平均额度与有效账号数（#221），排除重复、禁用、API、授权异常及过期数据；显示的是百分比平均值，并非 Token 总量。
+5. 账号详情支持选择重置卡并确认使用（#224），提交前核对状态和有效期、持久化请求 ID，并区分兑换结果与额度刷新失败。消费流程经过本地模拟服务验证，测试未消费真实重置卡。
+6. #205（Luna 客户端报错）与 #206（Windows OpenCode 设置页消失）继续保留，等待当前版本的原生复现；现有协议与模拟界面检查不能证明原报告已解决。
 
 - v3.0.3
 

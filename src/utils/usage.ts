@@ -18,9 +18,18 @@ export function formatTokenCount(value: number | undefined | null, locale?: stri
     return numberFormatter(locale).format(normalized);
   }
 
+  if (normalized < 1_000_000) {
+    return numberFormatter(locale, {
+      notation: "compact",
+      maximumFractionDigits: 1,
+    }).format(normalized);
+  }
+
+  // 百万以上保留两位小数，避免 2.43 亿和 2.46 亿都显示成 “2亿”。
   return numberFormatter(locale, {
     notation: "compact",
-    maximumFractionDigits: normalized < 100_000 ? 1 : 0,
+    maximumFractionDigits: 2,
+    minimumFractionDigits: 2,
   }).format(normalized);
 }
 
@@ -39,6 +48,12 @@ export function toProgressWidth(value: number | undefined | null): string {
   return `${clamped}%`;
 }
 
+/** "Pro Max", "pro_max" and "promax" all name the same tier. */
+function canonicalPlan(plan: string | null | undefined): string {
+  const normalized = plan?.trim().toLowerCase() ?? "";
+  return normalized.replace(/[\s_-]+/g, "") === "promax" ? "promax" : normalized;
+}
+
 export function formatPlan(
   plan: string | null | undefined,
   labels?: Record<string, string>,
@@ -46,7 +61,7 @@ export function formatPlan(
   if (!plan) {
     return labels?.unknown ?? "Unknown";
   }
-  const normalized = plan.trim().toLowerCase();
+  const normalized = canonicalPlan(plan);
   if (!normalized) {
     return labels?.unknown ?? "Unknown";
   }
@@ -55,16 +70,19 @@ export function formatPlan(
   }
   if (normalized === "free") return "Free";
   if (normalized === "plus") return "Plus";
+  if (normalized === "promax") return "PROMAX";
   if (normalized === "pro") return "Pro";
   if (normalized === "team") return "Team";
   if (normalized === "enterprise") return "Enterprise";
   if (normalized === "business") return "Business";
   if (normalized === "api") return "API";
-  return normalized[0].toUpperCase() + normalized.slice(1);
+  // Unknown tiers follow the uppercase tag style of the known ones.
+  return labels ? normalized.toUpperCase() : normalized[0].toUpperCase() + normalized.slice(1);
 }
 
 export function planTone(plan: string | null | undefined): string {
-  const normalized = plan?.trim().toLowerCase() ?? "";
+  const normalized = canonicalPlan(plan);
+  if (normalized === "promax") return "promax";
   if (normalized === "team") return "team";
   if (normalized === "pro") return "pro";
   if (normalized === "plus") return "plus";

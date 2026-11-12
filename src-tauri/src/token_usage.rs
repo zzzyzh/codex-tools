@@ -27,7 +27,13 @@ use time::UtcOffset;
 use crate::app_paths;
 use crate::utils::now_unix_seconds;
 
+mod account_usage;
 mod pricing;
+
+use account_usage::{
+    finish_accounts, is_response_boundary_line, line_timestamp_ms, response_duration_ms,
+    CodexAccountTokenUsage,
+};
 
 use pricing::estimate_token_cost_usd;
 use pricing::round_cost;
@@ -61,7 +67,7 @@ pub(crate) struct CodexTokenSessionUsage {
     pub(crate) total: CodexTokenTotals,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CodexTokenUsageSnapshot {
     pub(crate) updated_at: i64,
@@ -75,6 +81,7 @@ pub(crate) struct CodexTokenUsageSnapshot {
     pub(crate) last_7d: CodexTokenTotals,
     pub(crate) last_30d: CodexTokenTotals,
     pub(crate) latest_session: Option<CodexTokenSessionUsage>,
+    pub(crate) accounts: Vec<CodexAccountTokenUsage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -193,6 +200,9 @@ struct CodexCostAnalyticsCacheFile {
 struct ParsedTokenEvent {
     record_index: usize,
     timestamp: i64,
+    /// Time from the turn start or previous response to this event, when it
+    /// looks like a single model response.
+    duration_ms: Option<i64>,
     last: Option<CodexTokenTotals>,
     total: Option<CodexTokenTotals>,
 }
@@ -381,7 +391,9 @@ fn build_codex_token_usage_snapshot(
         last_7d: CodexTokenTotals::default(),
         last_30d: CodexTokenTotals::default(),
         latest_session: None,
+        accounts: Vec::new(),
     };
+    let mut accounts: HashMap<String, CodexAccountTokenUsage> = HashMap::new();
 
     let last_24h_start = now.saturating_sub(DAY_SECONDS);
     let last_3d_start = now.saturating_sub(3 * DAY_SECONDS);
@@ -409,7 +421,15 @@ fn build_codex_token_usage_snapshot(
         let delta_result =
             derive_confirmed_token_deltas(&session.events, ownership.inherited_record_end);
         snapshot.unresolved_usage_event_count += delta_result.unresolved_event_count;
+        let mut account = session.creator_account_id.as_ref().map(|account_id| {
+            accounts
+                .entry(account_id.clone())
+                .or_insert_with(|| CodexAccountTokenUsage::new(account_id.clone()))
+        });
         for event in &delta_result.events {
+            if let Some(account) = account.as_deref_mut() {
+                account.observe(event, last_24h_start, last_7d_start, last_30d_start);
+            }
             snapshot.event_count += 1;
             if event.timestamp >= last_24h_start {
                 snapshot.last_24h.add(&event.total);
@@ -437,12 +457,14 @@ fn build_codex_token_usage_snapshot(
         }
     }
 
+    snapshot.accounts = finish_accounts(accounts);
     snapshot
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConfirmedTokenDelta {
     timestamp: i64,
+    duration_ms: Option<i64>,
     total: CodexTokenTotals,
 }
 
@@ -495,6 +517,7 @@ fn derive_confirmed_token_deltas(
         }
         result.events.push(ConfirmedTokenDelta {
             timestamp: event.timestamp,
+            duration_ms: event.duration_ms,
             total: delta,
         });
     }
@@ -1073,11 +1096,15 @@ struct ParsedTokenSessionFile {
     filename_session_id: Option<String>,
     parent_session_id: Option<String>,
     parent_thread_id: Option<String>,
+    creator_account_id: Option<String>,
     identity_trusted: bool,
     header_checked: bool,
     record_hashes: Vec<u64>,
     events: Vec<ParsedTokenEvent>,
     latest_session: Option<CodexTokenSessionUsage>,
+    /// Millisecond timestamp of the latest turn start or response, carried
+    /// across incremental appends so TPS durations stay continuous.
+    response_boundary_ms: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -1701,11 +1728,13 @@ fn parse_token_session_file(path: &Path) -> Result<CachedTokenUsageFile, String>
         filename_session_id,
         parent_session_id: None,
         parent_thread_id: None,
+        creator_account_id: None,
         identity_trusted: false,
         header_checked: false,
         record_hashes: Vec::new(),
         events: Vec::new(),
         latest_session: None,
+        response_boundary_ms: None,
     };
 
     {
@@ -1813,10 +1842,22 @@ fn parse_token_session_lines<R: BufRead>(
                 parsed.payload_session_id = metadata.payload_session_id;
                 parsed.parent_session_id = metadata.forked_from_id;
                 parsed.parent_thread_id = metadata.parent_thread_id;
+                parsed.creator_account_id = metadata.creator_account_id;
+                parsed.response_boundary_ms = line_timestamp_ms(&line);
             }
             continue;
         }
-        if let Some(event) = parse_token_event_line_at(&line, record_index) {
+        if is_response_boundary_line(&line) {
+            if let Some(timestamp_ms) = line_timestamp_ms(&line) {
+                parsed.response_boundary_ms = Some(timestamp_ms);
+            }
+            continue;
+        }
+        if let Some(mut event) = parse_token_event_line_at(&line, record_index) {
+            if let Some(timestamp_ms) = line_timestamp_ms(&line) {
+                event.duration_ms = response_duration_ms(parsed.response_boundary_ms, timestamp_ms);
+                parsed.response_boundary_ms = Some(timestamp_ms);
+            }
             parsed.events.push(event);
         }
     }
@@ -1854,6 +1895,7 @@ struct ParsedSessionMetadata {
     payload_session_id: Option<String>,
     forked_from_id: Option<String>,
     parent_thread_id: Option<String>,
+    creator_account_id: Option<String>,
 }
 
 fn parse_session_metadata_payload(payload: &Value) -> ParsedSessionMetadata {
@@ -1873,6 +1915,12 @@ fn parse_session_metadata_payload(payload: &Value) -> ParsedSessionMetadata {
         parent_thread_id: payload
             .get("parent_thread_id")
             .and_then(Value::as_str)
+            .map(str::to_string),
+        creator_account_id: payload
+            .get("creator_account_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .map(str::to_string),
     }
 }
@@ -2166,6 +2214,7 @@ fn parse_token_event_root(
     Some(ParsedTokenEvent {
         record_index,
         timestamp,
+        duration_ms: None,
         last,
         total,
     })
@@ -3877,7 +3926,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    fn unique_temp_dir() -> PathBuf {
+    pub(super) fn unique_temp_dir() -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")

@@ -12,7 +12,6 @@ export function ClassicAccountList({
     locale,
     text,
     filteredRows,
-    leadingContent,
     accounts,
     tokenUsage,
     tokenUsageError,
@@ -22,10 +21,6 @@ export function ClassicAccountList({
   } = workspace;
 
   return (
-    <div className="accountListStack">
-      {leadingContent ? (
-        <div className="accountListLeading">{leadingContent}</div>
-      ) : null}
       <div className="accountListPanel">
         <ClassicAccountToolbar workspace={workspace} />
 
@@ -57,7 +52,7 @@ export function ClassicAccountList({
               <span>{copy.bottomDock.accounts}</span>
               <span>{text.fiveHourUsage}</span>
               <span>{text.weekUsage}</span>
-              <span>{text.resetTime}</span>
+              <span>{text.tokenUsageTitle}</span>
               <span>{text.proxyEnabled}</span>
               <span>{text.switchAccount}</span>
             </div>
@@ -73,6 +68,5 @@ export function ClassicAccountList({
           </div>
         )}
       </div>
-    </div>
   );
 }

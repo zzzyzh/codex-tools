@@ -1,8 +1,10 @@
-import { useRef } from "react";
+import { useI18n } from "../../i18n/I18nProvider";
+import { uiCopy } from "../../i18n/uiCopy";
+import { notifyFeedback } from "../ui/feedback";
+import { useRef, useState } from "react";
 import type { CodexCostAnalyticsSnapshot } from "../../types/app";
 import type { AnalyticsCopy } from "./types";
 import { alertLabel } from "./formatting";
-import { useAppLayout } from "../../hooks/useAppLayout";
 
 export function AnalyticsBudget({
   analytics,
@@ -17,18 +19,20 @@ export function AnalyticsBudget({
   onUpdate: (value: number | null) => Promise<void>;
   text: AnalyticsCopy;
 }) {
-  const { layout } = useAppLayout();
+  const { locale } = useI18n();
+  const [invalid, setInvalid] = useState(false);
+  const ui = uiCopy(locale);
   const input = useRef<HTMLInputElement>(null);
   const budgetValue = weeklyBudgetUsd === null ? "" : String(weeklyBudgetUsd);
   const alert = analytics?.weeklyBudgetAlert ?? "none";
   const save = () => {
     const trimmed = input.current?.value.trim() ?? "";
     const value = trimmed === "" ? null : Number(trimmed);
-    if (value !== null && (!Number.isFinite(value) || value <= 0)) return;
-    void onUpdate(value);
+    if (value !== null && (!Number.isFinite(value) || value <= 0)) { setInvalid(true); input.current?.focus(); return; }
+    setInvalid(false);
+    void onUpdate(value).then(() => notifyFeedback("saved")).catch(() => notifyFeedback("saveFailed"));
   };
-  if (layout === "classic")
-    return (
+  return (
       <section className={`analyticsBudget tone-${alert}`}>
         <div>
           <span>{text.budgetTitle}</span>
@@ -48,10 +52,14 @@ export function AnalyticsBudget({
             ref={input}
             key={budgetValue}
             defaultValue={budgetValue}
+            aria-invalid={invalid}
+            aria-describedby={invalid ? "budget-error" : undefined}
+            onInput={() => setInvalid(false)}
             inputMode="decimal"
             placeholder={text.budgetPlaceholder}
           />
         </label>
+        {invalid && <p id="budget-error" className="uiInlineError" role="alert">{ui.budgetInvalid}</p>}
         <div className="analyticsBudgetActions">
           <button
             type="button"
@@ -59,7 +67,8 @@ export function AnalyticsBudget({
             disabled={saving}
             onClick={() => {
               if (input.current) input.current.value = "";
-              void onUpdate(null);
+              setInvalid(false);
+              void onUpdate(null).then(() => notifyFeedback("saved")).catch(() => notifyFeedback("saveFailed"));
             }}
           >
             {text.budgetClear}
@@ -75,56 +84,4 @@ export function AnalyticsBudget({
         </div>
       </section>
     );
-  return (
-    <details
-      className={`analyticsBudgetControl tone-${alert}`}
-      open={alert === "danger" || alert === "warning"}
-    >
-      <summary>
-        <span>{text.budgetTitle}</span>
-        <strong>{alertLabel(alert, text)}</strong>
-        <span className="analyticsBudgetMiniTrack" aria-hidden="true">
-          <i
-            style={{
-              width: `${Math.max(0, Math.min(100, analytics?.weeklyBudgetPercent ?? 0))}%`,
-            }}
-          />
-        </span>
-      </summary>
-      <div className="analyticsBudgetEditor">
-        <p>{text.budgetDescription}</p>
-        <div>
-          <label>
-            <span>{text.budgetInputLabel}</span>
-            <input
-              ref={input}
-              key={budgetValue}
-              defaultValue={budgetValue}
-              inputMode="decimal"
-              placeholder={text.budgetPlaceholder}
-            />
-          </label>
-          <button
-            type="button"
-            className="ghost"
-            disabled={saving}
-            onClick={() => {
-              if (input.current) input.current.value = "";
-              void onUpdate(null);
-            }}
-          >
-            {text.budgetClear}
-          </button>
-          <button
-            type="button"
-            className="primary"
-            disabled={saving}
-            onClick={save}
-          >
-            {text.budgetSave}
-          </button>
-        </div>
-      </div>
-    </details>
-  );
 }

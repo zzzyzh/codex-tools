@@ -1,9 +1,10 @@
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAccountsWorkspace } from "../../hooks/useAccountsWorkspace";
 import { getUiCopy } from "../accounts/accountCopy";
 import type { AccountsGridProps } from "../accounts/types";
 import type { AccountSummary, CodexTokenUsageSnapshot } from "../../types/app";
+import { indexAccountTokenUsage } from "./accountTokenStats";
 
 export type ClassicAccountsProps = AccountsGridProps & {
   tokenUsage: CodexTokenUsageSnapshot | null;
@@ -14,11 +15,11 @@ export type ClassicAccountsProps = AccountsGridProps & {
 export function useClassicAccounts(props: ClassicAccountsProps) {
   const { copy, locale } = useI18n();
   const workspace = useAccountsWorkspace(props);
-  const text = {
-    ...getUiCopy(locale),
-    fiveHourUsage: locale === "zh-CN" ? "5小时使用率" : "5h usage",
-    weekUsage: locale === "zh-CN" ? "周使用率" : "Weekly usage",
-  };
+  const text = getUiCopy(locale);
+  const tokenUsageByAccount = useMemo(
+    () => indexAccountTokenUsage(props.tokenUsage),
+    [props.tokenUsage],
+  );
   const [editingAliasId, setEditingAliasId] = useState<string | null>(null);
   const [aliasDraft, setAliasDraft] = useState("");
   const [expandedResetCreditsByAccount, setExpandedResetCreditsByAccount] =
@@ -69,6 +70,12 @@ export function useClassicAccounts(props: ClassicAccountsProps) {
     locale,
     text,
     selectedRow,
+    inspectorOpen: workspace.inspectedAccount !== null,
+    closeInspector: () => {
+      cancelAliasEdit();
+      workspace.inspect(null);
+    },
+    tokenUsageByAccount,
     editingAliasId,
     aliasDraft,
     setAliasDraft,

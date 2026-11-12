@@ -1,27 +1,22 @@
-import { AccountsGrid } from "../AccountsGrid";
+import { PageFrame } from "../ui/PageFrame";
 import type { CodexController } from "../../types/workspace";
 import type { AccountsGridProps } from "../accounts/types";
-import { useAppLayout } from "../../hooks/useAppLayout";
 import { ClassicAccountsGrid } from "../classic/ClassicAccountsGrid";
 import { ClassicMetaStrip } from "../classic/ClassicMetaStrip";
 import { ClassicAccountActions } from "../classic/ClassicAccountActions";
+import { moveAccountGroup } from "../../utils/accountDisplayOrder";
 
 export function AccountsView({
   c,
-  searchVisible,
-  onCloseSearch,
-  onShowAnalytics,
 }: {
   c: CodexController;
-  searchVisible: boolean;
-  onCloseSearch: () => void;
-  onShowAnalytics: () => void;
 }) {
-  const { layout } = useAppLayout();
   const actions: AccountsGridProps = {
-    searchVisible,
-    onCloseSearch,
-    onShowAnalytics,
+    accountOrder: c.settings.accountOrder,
+    orderingAccounts: c.savingSettings,
+    onMoveAccount: (account, direction) => void c.updateSettings({
+      accountOrder: moveAccountGroup(c.accounts, c.settings.accountOrder, account.accountKey, direction),
+    }),
     onSmartSwitch: () => void c.onSmartSwitch(),
     smartSwitching: c.smartSwitching,
     accounts: c.accounts,
@@ -33,6 +28,8 @@ export function AccountsView({
     authBusy: c.authBusy,
     switchingId: c.switchingId,
     warmingAccountId: c.warmingAccountId,
+    resettingAccountId: c.resettingAccountId,
+    onUseResetCredit: c.onUseResetCredit,
     renamingAccountId: c.renamingAccountId,
     pendingDeleteId: c.pendingDeleteId,
     onExportAll: () => void c.onExportAccounts(),
@@ -46,30 +43,26 @@ export function AccountsView({
     onDelete: (account) => void c.onDelete(account),
   };
   return (
-    <div className="accountsPage">
-      {layout === "classic" ? (
-        <ClassicAccountsGrid
-          {...actions}
-          tokenUsage={c.tokenUsage}
-          tokenUsageError={c.tokenUsageError}
-          leadingContent={
-            <ClassicMetaStrip
-              accounts={c.accounts}
-              exportingAccounts={c.exportingAccounts}
-              onExportAccounts={actions.onExportAll}
-            />
-          }
-          toolbarActions={
-            <ClassicAccountActions
-              onOpenAddDialog={c.onOpenAddDialog}
-              onSmartSwitch={actions.onSmartSwitch}
-              smartSwitching={c.smartSwitching || c.authBusy}
-            />
-          }
-        />
-      ) : (
-        <AccountsGrid {...actions} />
-      )}
-    </div>
+    <PageFrame kind="list" className="accountsPage">
+      <ClassicAccountsGrid
+        {...actions}
+        tokenUsage={c.tokenUsage}
+        tokenUsageError={c.tokenUsageError}
+        leadingContent={
+          <ClassicMetaStrip
+            accounts={c.accounts}
+            exportingAccounts={c.exportingAccounts}
+            onExportAccounts={actions.onExportAll}
+          />
+        }
+        toolbarActions={
+          <ClassicAccountActions
+            onOpenAddDialog={c.onOpenAddDialog}
+            onSmartSwitch={actions.onSmartSwitch}
+            smartSwitching={c.smartSwitching || c.authBusy}
+          />
+        }
+      />
+    </PageFrame>
   );
 }

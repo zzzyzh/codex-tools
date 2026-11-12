@@ -13,6 +13,8 @@ export type CreditSnapshot = {
 };
 
 export type ResetCredit = {
+  id?: string | null;
+  status?: string | null;
   grantedAt: number | null;
   expiresAt: number | null;
 };
@@ -45,6 +47,18 @@ export type CodexTokenSessionUsage = {
   total: CodexTokenTotals;
 };
 
+export type CodexAccountTokenUsage = {
+  accountId: string;
+  last24h: CodexTokenTotals;
+  last7d: CodexTokenTotals;
+  last30d: CodexTokenTotals;
+  lastActiveAt: number | null;
+  responseCount24h: number;
+  outputTps24h: number | null;
+  outputTps7d: number | null;
+  latestOutputTps: number | null;
+};
+
 export type CodexTokenUsageSnapshot = {
   updatedAt: number;
   sourcePathCount: number;
@@ -57,6 +71,8 @@ export type CodexTokenUsageSnapshot = {
   last7d: CodexTokenTotals;
   last30d: CodexTokenTotals;
   latestSession: CodexTokenSessionUsage | null;
+  /** Older backends omit per-account attribution. */
+  accounts?: CodexAccountTokenUsage[];
 };
 
 export type CodexBudgetAlert = "none" | "ok" | "warning" | "danger";
@@ -179,7 +195,26 @@ export type AccountSummary = {
   isCurrent: boolean;
 };
 
+export type LocalProjectSwitchPreview = {
+  projectCount: number;
+  threadLinkCount: number;
+  unassignedThreadCount: number;
+  retainedTargetProjectCount: number;
+  requiresMergeConfirmation: boolean;
+  previewFingerprint: string;
+  noOp: boolean;
+};
+
+export type LocalProjectPreservation = {
+  status: "prepared" | "verified" | "pending" | "noOp" | "skipped";
+  projectCount: number;
+  threadLinkCount: number;
+  unassignedThreadCount: number;
+  warning: string | null;
+};
+
 export type SwitchAccountResult = {
+  localProjectPreservation?: LocalProjectPreservation | null;
   accountId: string;
   noOp?: boolean;
   launchedAppPath: string | null;
@@ -432,7 +467,7 @@ export type WindowsTrayIconStyle =
   | "logoProgressRing";
 export type WindowsTaskbarWidgetPlacement = "embedded" | "left" | "hidden";
 
-export type ApiProxyLoadBalanceMode = "average" | "sequential";
+export type ApiProxyLoadBalanceMode = "average" | "sequential" | "priority";
 
 export type EditorAppId =
   | "vscode"
@@ -452,6 +487,7 @@ export type AppSettings = {
   launchAtStartup: boolean;
   trayUsageDisplayMode: TrayUsageDisplayMode;
   trayUsageTitleShowWindowLabels: boolean;
+  macosTrayProxyPool: boolean;
   macosTrayTextIconStyle: MacosTrayTextIconStyle;
   windowsTrayIconStyle: WindowsTrayIconStyle;
   trayQuotaIconVisible: boolean;
@@ -460,6 +496,7 @@ export type AppSettings = {
   windowsQuotaOnboardingCompleted: boolean;
   macosQuotaOnboardingCompleted: boolean;
   launchCodexAfterSwitch: boolean;
+  preserveLocalProjects: boolean;
   smartSwitchIncludeApi: boolean;
   launchCodexAsAdmin: boolean;
   codexLaunchPath: string | null;
@@ -470,9 +507,13 @@ export type AppSettings = {
   autoStartApiProxy: boolean;
   apiProxyPort: number;
   apiProxyLoadBalanceMode: ApiProxyLoadBalanceMode;
+  accountOrder: string[];
   apiProxySequentialFiveHourLimitPercent: number;
   apiProxyDisabledModels: string[];
   autoAccountWarmupEnabled: boolean;
+  autoAccountWarmupScheduleEnabled: boolean;
+  autoAccountWarmupStartMinute: number;
+  autoAccountWarmupEndMinute: number;
   autoAccountWarmupAccountIds: string[];
   codexAnalyticsWeeklyBudgetUsd: number | null;
   remoteServers: RemoteServerConfig[];

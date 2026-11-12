@@ -59,8 +59,7 @@ pub(crate) fn prepare_windows_codex_launch(
         .as_ref()
         .map(|target| target.executable().to_path_buf());
     if as_admin && matches!(desktop, Some(WindowsDesktopTarget::Store(_))) {
-        discovery_error = Some("微软商店版 ChatGPT/Codex 不支持以管理员身份启动，请关闭管理员启动或指定可用的桌面版/CLI。".to_string());
-        desktop = None;
+        log::warn!("微软商店版 ChatGPT/Codex 不支持以管理员身份启动，自动使用普通权限启动。");
     }
     let plan = WindowsCodexLaunchPlan {
         desktop,
@@ -91,6 +90,20 @@ impl WindowsCodexLaunchPlan {
                     windows_launch_failure(self.discovery_error.as_deref(), error)
                 ));
             }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn assert_stopped(&self) -> Result<(), String> {
+        let mut system = sysinfo::System::new();
+        refresh_windows_switch_processes(&mut system);
+        let expected = self
+            .selected_desktop_path
+            .clone()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if !running_windows_desktop_process_ids(&system, &expected)?.is_empty() {
+            return Err("PROJECT_SHARING_DESKTOP_RUNNING".into());
         }
         Ok(())
     }

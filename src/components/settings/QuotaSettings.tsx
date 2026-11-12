@@ -1,3 +1,5 @@
+import { Switch } from "../ui/Switch";
+import { SwitchField } from "../SwitchField";
 import type { SettingsWorkspace } from "./useSettingsWorkspace";
 export function QuotaSettings({ workspace }: { workspace: SettingsWorkspace }) {
   const {
@@ -20,8 +22,21 @@ export function QuotaSettings({ workspace }: { workspace: SettingsWorkspace }) {
   } = workspace;
   return (
     <div className="settingsGroup">
+      {isMacos ? (
+        <div>
+          <SwitchField
+            checked={settings.macosTrayProxyPool}
+            onChange={(checked) => onUpdateSettings({ macosTrayProxyPool: checked })}
+            label={copy.settings.proxyPoolDisplay.label}
+            checkedText=""
+            uncheckedText=""
+            disabled={savingSettings}
+          />
+          <p className="settingDescription">{copy.settings.proxyPoolDisplay.description}</p>
+        </div>
+      ) : null}
       {isMacos || isWindows ? (
-        <div className="settingRow settingRowTrayUsage">
+        <div className="settingRow uiSettingsRow-stacked settingRowTrayUsage">
           <div className="settingMeta">
             <strong>{copy.settings.trayUsageDisplay.label}</strong>
           </div>
@@ -108,37 +123,17 @@ export function QuotaSettings({ workspace }: { workspace: SettingsWorkspace }) {
                 </button>
               ) : null}
             </div>
-            <label
-              className="themeSwitch trayUsageTitleSwitch"
-              aria-label={copy.settings.trayUsageTitleWindowLabels.label}
-              title={
-                settings.trayUsageTitleShowWindowLabels
-                  ? copy.settings.trayUsageTitleWindowLabels.checkedText
-                  : copy.settings.trayUsageTitleWindowLabels.uncheckedText
-              }
-            >
-              <span className="trayUsageTitleSwitchLabel">
-                {copy.settings.trayUsageTitleWindowLabels.label}
-              </span>
-              <input
-                type="checkbox"
-                checked={settings.trayUsageTitleShowWindowLabels}
-                disabled={savingSettings}
-                onChange={(event) =>
-                  onUpdateSettings({
-                    trayUsageTitleShowWindowLabels: event.target.checked,
-                  })
-                }
-              />
-              <span className="themeSwitchTrack" aria-hidden="true">
-                <span className="themeSwitchThumb" />
-              </span>
-            </label>
+            <div className="trayUsageTitleSwitch">
+              <span>{copy.settings.trayUsageTitleWindowLabels.label}</span>
+              <Switch label={copy.settings.trayUsageTitleWindowLabels.label}
+                checked={settings.trayUsageTitleShowWindowLabels} disabled={savingSettings}
+                onChange={checked => onUpdateSettings({ trayUsageTitleShowWindowLabels: checked })} />
+            </div>
           </div>
         </div>
       ) : null}
       {isWindows || isMacos ? (
-        <div className="settingRow settingRowTrayUsage">
+        <div className="settingRow uiSettingsRow-stacked settingRowTrayUsage">
           <div className="settingMeta">
             <strong>{copy.settings.windowsTrayIconStyle.label}</strong>
           </div>
@@ -280,9 +275,6 @@ export function QuotaSettings({ workspace }: { workspace: SettingsWorkspace }) {
         <div className="settingRow">
           <div className="settingMeta">
             <strong>{copy.settings.macosQuotaOnboardingPreview.label}</strong>
-            <span className="settingDescription">
-              {copy.settings.macosQuotaOnboardingPreview.description}
-            </span>
           </div>
           <div className="settingActionGroup">
             <button
@@ -302,7 +294,7 @@ export function QuotaSettings({ workspace }: { workspace: SettingsWorkspace }) {
         </div>
       ) : null}
       {isWindows ? (
-        <div className="settingRow settingRowWindowsTaskbar">
+        <div className="settingRow uiSettingsRow-stacked settingRowWindowsTaskbar">
           <div className="settingMeta">
             <strong>{copy.settings.windowsTaskbarWidget.label}</strong>
           </div>

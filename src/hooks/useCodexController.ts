@@ -1,4 +1,9 @@
+import { savedAuthorizationApp } from "../utils/authorizationApp";
 import { useApiAccountEditor } from "./useApiAccountEditor";
+import { useConfirmation } from "./useConfirmation";
+import type { LocalProjectMergeRequest } from "../components/LocalProjectDialogs";
+import { appendLocalProjectNotice, composeLocalProjectSwitchNotice, createLocalProjectSwitchFlow, createLocalProjectRecoveryFlow, createProjectCommandGate, localizeProjectSharingError } from "../utils/localProjectSwitch";
+import { useResetCredits } from "./useResetCredits";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -39,6 +44,7 @@ import type {
   RemoteServerConfig,
   StartCloudflaredTunnelInput,
   SwitchAccountResult,
+  LocalProjectSwitchPreview,
   TestApiAccountConnectionInput,
   TestApiAccountConnectionResult,
   UpdateApiProxyKeyInput,
@@ -52,6 +58,10 @@ import {
   getLatestChangelogEntry,
   getUnreleasedChangelogEntry,
 } from "../utils/changelog";
+
+import { buildUsageRefreshNotice } from "../utils/usageRefreshNotice";
+import { persistLocaleWhenReady } from "../utils/localePersistence";
+import { createDeferredInitialization } from "../utils/deferredInitialization";
 
 const COST_ANALYTICS_STALE_MS = 30 * 60 * 1000;
 const UPDATE_CHECK_MS = 60 * 60 * 1000;
@@ -73,6 +83,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   launchAtStartup: false,
   trayUsageDisplayMode: "oneWeekRemaining",
   trayUsageTitleShowWindowLabels: false,
+  macosTrayProxyPool: false,
   macosTrayTextIconStyle: "codexTools",
   windowsTrayIconStyle: "gradientNumberPlate",
   trayQuotaIconVisible: true,
@@ -81,6 +92,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   windowsQuotaOnboardingCompleted: false,
   macosQuotaOnboardingCompleted: false,
   launchCodexAfterSwitch: true,
+  preserveLocalProjects: true,
   smartSwitchIncludeApi: false,
   launchCodexAsAdmin: false,
   codexLaunchPath: null,
@@ -91,9 +103,13 @@ const DEFAULT_SETTINGS: AppSettings = {
   autoStartApiProxy: false,
   apiProxyPort: 8787,
   apiProxyLoadBalanceMode: "average",
+  accountOrder: [],
   apiProxySequentialFiveHourLimitPercent: 80,
   apiProxyDisabledModels: [],
   autoAccountWarmupEnabled: false,
+  autoAccountWarmupScheduleEnabled: false,
+  autoAccountWarmupStartMinute: 360,
+  autoAccountWarmupEndMinute: 1320,
   autoAccountWarmupAccountIds: [],
   codexAnalyticsWeeklyBudgetUsd: null,
   remoteServers: [],
@@ -324,6 +340,17 @@ export function useCodexController(
   );
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [recoveryRequired, setRecoveryRequired] = useState(false);
+  const [recoveringLocalProjects, setRecoveringLocalProjects] = useState(false);
+  const projectCommands = useRef(createProjectCommandGate(invoke, () => setRecoveryRequired(true)));
+  const [switchLocalProjects] = useState(createLocalProjectSwitchFlow);
+  const [recoverLocalProjects] = useState(createLocalProjectRecoveryFlow);
+  const [initializeBackground] = useState(createDeferredInitialization);
+  const { pending: localProjectMergeRequest, request: requestLocalProjectMerge, answer: answerLocalProjectMerge } = useConfirmation<LocalProjectMergeRequest>();
+  const { pending: localProjectRecoveryConfirmation, request: requestLocalProjectRecovery, answer: answerLocalProjectRecovery } = useConfirmation<boolean>();
+  useEffect(() => {
+    if (recoveryRequired) answerLocalProjectMerge(false);
+  }, [answerLocalProjectMerge, recoveryRequired]);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
@@ -352,12 +379,12 @@ export function useCodexController(
     () => sortAccountsByRemaining(accounts),
     [accounts],
   );
-  const authBusy =
+  const accountAuthBusy =
     importingAccounts || oauthWaitingForCallback || switchingId !== null || warmingAccountId !== null;
 
   const localizeError = useCallback(
-    (error: string) => localizeBackendError(error, locale),
-    [locale],
+    (error: string) => localizeProjectSharingError(error, copy.localProjects) ?? localizeBackendError(error, locale),
+    [copy.localProjects, locale],
   );
 
   const localizeAccounts = useCallback(
@@ -422,6 +449,15 @@ export function useCodexController(
     [copy.notices, localizeAccounts],
   );
 
+  const { resettingAccountId, onUseResetCredit } = useResetCredits({
+    busy: recoveryRequired || accountAuthBusy,
+    invokeCommand: projectCommands.current.invoke,
+    applyAccounts,
+    setNotice,
+    localizeError,
+  });
+  const authBusy = recoveryRequired || accountAuthBusy || resettingAccountId !== null;
+
   const localizeApiProxyStatus = useCallback(
     (status: ApiProxyStatus): ApiProxyStatus => ({
       ...status,
@@ -473,7 +509,7 @@ export function useCodexController(
   }, [remoteProxyStatusesRaw]);
 
   const loadAccounts = useCallback(async () => {
-    const data = await invoke<AccountSummary[]>("list_accounts");
+    const data = await projectCommands.current.invoke<AccountSummary[]>("list_accounts");
     applyAccounts(data);
     return data;
   }, [applyAccounts]);
@@ -499,18 +535,42 @@ export function useCodexController(
   );
 
   const loadSettings = useCallback(async () => {
-    try {
-      const data = await invoke<AppSettings>("get_app_settings");
-      settingsRef.current = data;
-      setSettings(data);
-    } finally {
-      setSettingsLoaded(true);
-    }
+    const data = await projectCommands.current.invoke<AppSettings>("get_app_settings");
+    settingsRef.current = data;
+    setSettings(data);
+    setSettingsLoaded(true);
   }, []);
+
+  const onRecoverLocalProjects = useCallback(async () => {
+    try {
+      const recovered = await recoverLocalProjects({
+        confirm: () => requestLocalProjectRecovery(true),
+        recover: async () => {
+          setRecoveringLocalProjects(true);
+          return projectCommands.current.invoke<boolean>("recover_local_project_switch", {});
+        },
+        reload: async () => {
+          projectCommands.current.allowRecoveryReload();
+          await loadSettings();
+          await loadAccounts();
+        },
+      });
+      if (recovered === null) return;
+      projectCommands.current.finishRecovery();
+      setRecoveryRequired(false);
+      setInitialUsageRefreshPending(false);
+      setNotice({ type: "info", message: recovered ? copy.localProjects.recovered : copy.localProjects.noRecovery });
+    } catch (error) {
+      projectCommands.current.requireRecovery();
+      setNotice({ type: "error", message: localizeProjectSharingError(String(error), copy.localProjects) ?? copy.localProjects.errors.generic });
+    } finally {
+      setRecoveringLocalProjects(false);
+    }
+  }, [copy.localProjects, loadAccounts, loadSettings, recoverLocalProjects, requestLocalProjectRecovery]);
 
   const loadInstalledEditorApps = useCallback(async () => {
     try {
-      const data = await invoke<InstalledEditorApp[]>(
+      const data = await projectCommands.current.invoke<InstalledEditorApp[]>(
         "list_installed_editor_apps",
       );
       setInstalledEditorApps(data);
@@ -521,7 +581,7 @@ export function useCodexController(
 
   const loadOpencodeDesktopAppInstalled = useCallback(async () => {
     try {
-      const installed = await invoke<boolean>(
+      const installed = await projectCommands.current.invoke<boolean>(
         "is_opencode_desktop_app_installed",
       );
       setHasOpencodeDesktopApp(installed);
@@ -532,7 +592,7 @@ export function useCodexController(
 
   const loadApiProxyStatus = useCallback(async () => {
     try {
-      const data = await invoke<ApiProxyStatus>("get_api_proxy_status");
+      const data = await projectCommands.current.invoke<ApiProxyStatus>("get_api_proxy_status");
       setApiProxyStatus(localizeApiProxyStatus(data));
     } catch {
       setApiProxyStatus(DEFAULT_API_PROXY_STATUS);
@@ -542,7 +602,7 @@ export function useCodexController(
   const loadApiProxyKeys = useCallback(async () => {
     setApiProxyKeysLoading(true);
     try {
-      const data = await invoke<ApiProxyKey[]>("list_api_proxy_keys");
+      const data = await projectCommands.current.invoke<ApiProxyKey[]>("list_api_proxy_keys");
       setApiProxyKeys(Array.isArray(data) ? data : []);
     } catch {
       setApiProxyKeys([]);
@@ -554,7 +614,7 @@ export function useCodexController(
   const loadApiProxyKeyLogs = useCallback(
     async (options?: { silent?: boolean }) => {
       try {
-        const data = await invoke<ApiProxyKeyUsageLogEntry[]>(
+        const data = await projectCommands.current.invoke<ApiProxyKeyUsageLogEntry[]>(
           "get_api_proxy_key_usage_logs",
           {
             limit: 200,
@@ -572,7 +632,7 @@ export function useCodexController(
 
   const loadApiProxySupportedModels = useCallback(async () => {
     try {
-      const data = await invoke<string[]>("get_api_proxy_supported_models");
+      const data = await projectCommands.current.invoke<string[]>("get_api_proxy_supported_models");
       setApiProxySupportedModels(Array.isArray(data) ? data : []);
     } catch {
       setApiProxySupportedModels([]);
@@ -595,7 +655,7 @@ export function useCodexController(
       const requestId = ++apiProxyUsageLoadSeqRef.current;
 
       try {
-        const data = await invoke<ApiProxyUsageStats>(
+        const data = await projectCommands.current.invoke<ApiProxyUsageStats>(
           "get_api_proxy_usage_stats",
           {
             rangeSeconds: API_PROXY_USAGE_RANGE_SECONDS[range],
@@ -622,7 +682,7 @@ export function useCodexController(
 
   const loadCloudflaredStatus = useCallback(async () => {
     try {
-      const data = await invoke<CloudflaredStatus>("get_cloudflared_status");
+      const data = await projectCommands.current.invoke<CloudflaredStatus>("get_cloudflared_status");
       setCloudflaredStatus(localizeCloudflaredStatus(data));
     } catch {
       setCloudflaredStatus(DEFAULT_CLOUDFLARED_STATUS);
@@ -638,7 +698,7 @@ export function useCodexController(
         }
 
         try {
-          const data = await invoke<AppSettings>("update_app_settings", {
+          const data = await projectCommands.current.invoke<AppSettings>("update_app_settings", {
             patch,
           });
           settingsRef.current = data;
@@ -673,10 +733,25 @@ export function useCodexController(
     [copy.notices, localizeError],
   );
 
+  useEffect(() => {
+    // Local/browser preferences are available before the account store. Wait for
+    // its successful read, then use the same queued, recovery-gated settings path.
+    void persistLocaleWhenReady({
+      locale,
+      persistedLocale: settings.locale,
+      settingsLoaded,
+      recoveryRequired,
+    }, (patch) => updateSettings(patch, {
+      silent: true, keepInteractive: true, throwOnError: true,
+    })).catch(() => {
+      // updateSettings already reports a localized error and detects recovery.
+    });
+  }, [locale, settings.locale, settingsLoaded, recoveryRequired, updateSettings]);
+
   const refreshUsage = useCallback(
     async (
       quiet = false,
-      forceAuthRefresh = !quiet,
+      forceAuthRefresh = false,
       initialRefresh = false,
       source: "startup" | "account-import" | "manual" =
         "manual",
@@ -691,7 +766,7 @@ export function useCodexController(
         if (!quiet) {
           setRefreshing(true);
         }
-        const data = await invoke<AccountSummary[]>("refresh_all_usage", {
+        const data = await projectCommands.current.invoke<AccountSummary[]>("refresh_all_usage", {
           forceAuthRefresh,
           source,
         });
@@ -700,7 +775,7 @@ export function useCodexController(
           setUsageRefreshError(null);
         }
         if (!quiet && !promptedRelogin) {
-          setNotice({ type: "ok", message: copy.notices.usageRefreshed });
+          setNotice(buildUsageRefreshNotice(data, copy));
         }
       } catch (error) {
         const localizedError = localizeError(String(error));
@@ -729,7 +804,7 @@ export function useCodexController(
         }
       }
     },
-    [applyAccounts, copy.notices, localizeError],
+    [applyAccounts, copy, localizeError],
   );
 
   const refreshTokenUsage = useCallback(
@@ -742,7 +817,7 @@ export function useCodexController(
         if (!quiet) {
           setRefreshingTokenUsage(true);
         }
-        const data = await invoke<CodexTokenUsageSnapshot>(
+        const data = await projectCommands.current.invoke<CodexTokenUsageSnapshot>(
           "get_codex_token_usage",
         );
         setTokenUsage(data);
@@ -772,7 +847,7 @@ export function useCodexController(
         if (!quiet) {
           setCostAnalyticsLoading(true);
         }
-        const data = await invoke<CodexCostAnalyticsSnapshot | null>(
+        const data = await projectCommands.current.invoke<CodexCostAnalyticsSnapshot | null>(
           "get_cached_codex_cost_analytics",
         );
         if (data) {
@@ -817,7 +892,7 @@ export function useCodexController(
         });
       }
       try {
-        const data = await invoke<CodexCostAnalyticsSnapshot>(
+        const data = await projectCommands.current.invoke<CodexCostAnalyticsSnapshot>(
           "refresh_codex_cost_analytics",
         );
         setCostAnalytics(data);
@@ -855,7 +930,7 @@ export function useCodexController(
 
       setCostAnalyticsExporting(format);
       try {
-        const exportedPath = await invoke<string | null>(
+        const exportedPath = await projectCommands.current.invoke<string | null>(
           "export_codex_cost_analytics",
           {
             format,
@@ -884,7 +959,7 @@ export function useCodexController(
   const onDeleteCodexSession = useCallback(
     async (session: { sessionId: string; sourcePath: string }) => {
       try {
-        const result = await invoke<DeleteCodexSessionResult>(
+        const result = await projectCommands.current.invoke<DeleteCodexSessionResult>(
           "delete_codex_session",
           {
             sourcePath: session.sourcePath,
@@ -1068,7 +1143,7 @@ export function useCodexController(
 
   const openManualDownloadPage = useCallback(async () => {
     try {
-      await invoke("open_external_url", { url: PROJECT_LATEST_RELEASE_URL });
+      await projectCommands.current.invoke("open_external_url", { url: PROJECT_LATEST_RELEASE_URL });
     } catch (error) {
       setNotice({
         type: "error",
@@ -1082,7 +1157,7 @@ export function useCodexController(
   const openExternalUrl = useCallback(
     async (url: string) => {
       try {
-        await invoke("open_external_url", { url });
+        await projectCommands.current.invoke("open_external_url", { url });
       } catch (error) {
         setNotice({
           type: "error",
@@ -1251,38 +1326,51 @@ export function useCodexController(
         // 代理统计或网络请求阻塞首屏。编辑器仅在进入设置页时扫描。
         const initialAccounts = await loadAccounts();
         maybeShowProfileIntegrityNotice(initialAccounts);
+      } catch (error) {
+        setNotice({ type: "error", message: localizeError(String(error)) });
+        setInitialUsageRefreshPending(false);
+        return;
       } finally {
         setLoading(false);
       }
 
-      // 这些任务不影响已有账号和缓存用量的展示。并行执行可避免一个
-      // 慢速网络请求（用量刷新上限为 18 秒）拖住其他初始化任务。
-      const settingsTask = loadSettings();
-      void Promise.allSettled([
-        settingsTask,
-        loadApiProxySupportedModels(),
-        loadApiProxyKeys(),
-        loadApiProxyStatus(),
-        loadCloudflaredStatus(),
-        // A clean installation has no cached usage yet. Allow this one silent
-        // startup refresh to renew stale auth tokens, while periodic refreshes
-        // remain lightweight and do not rotate credentials unnecessarily.
-        refreshUsage(true, true, true, "startup"),
-        refreshTokenUsage(true),
-        settingsTask.then(() => checkForAppUpdate(true)),
-      ]);
+      try {
+        await loadSettings();
+      } catch (error) {
+        setNotice({ type: "error", message: localizeError(String(error)) });
+      }
     };
 
     void bootstrap();
   }, [
-    checkForAppUpdate,
     loadAccounts,
+    loadSettings,
+    maybeShowProfileIntegrityNotice,
+    localizeError,
+  ]);
+
+  useEffect(() => {
+    // Startup can stop before these tasks when a transaction needs recovery.
+    // A successful settings reload enables them; recovery resets the one-run
+    // guard so keys/models and loading flags are refreshed after it finishes.
+    void initializeBackground({ settingsLoaded, recoveryRequired }, [
+      loadApiProxySupportedModels,
+      loadApiProxyKeys,
+      loadApiProxyStatus,
+      loadCloudflaredStatus,
+      () => refreshUsage(true, true, true, "startup"),
+      () => refreshTokenUsage(true),
+      () => checkForAppUpdate(true),
+    ]);
+  }, [
+    initializeBackground,
+    settingsLoaded,
+    recoveryRequired,
+    checkForAppUpdate,
     loadApiProxyKeys,
     loadApiProxySupportedModels,
     loadApiProxyStatus,
     loadCloudflaredStatus,
-    loadSettings,
-    maybeShowProfileIntegrityNotice,
     refreshTokenUsage,
     refreshUsage,
   ]);
@@ -1352,7 +1440,9 @@ export function useCodexController(
       return;
     }
     loadedLocaleRef.current = locale;
-    void loadAccounts();
+    void loadAccounts().catch((error: unknown) => {
+      setNotice({ type: "error", message: localizeError(String(error)) });
+    });
     void loadApiProxyStatus();
     void loadCloudflaredStatus();
   }, [
@@ -1361,6 +1451,7 @@ export function useCodexController(
     loadCloudflaredStatus,
     loading,
     locale,
+    localizeError,
   ]);
 
   useEffect(() => {
@@ -1410,7 +1501,7 @@ export function useCodexController(
     void Promise.all(
       settings.remoteServers.map(async (server) => {
         try {
-          const status = await invoke<RemoteProxyStatus>(
+          const status = await projectCommands.current.invoke<RemoteProxyStatus>(
             "get_remote_proxy_status",
             { server },
           );
@@ -1640,7 +1731,7 @@ export function useCodexController(
   const onPrepareOauthLogin = useCallback(async () => {
     setOauthWaitingForCallback(false);
     try {
-      return await invoke<PreparedOauthLogin>("prepare_oauth_login", {
+      return await projectCommands.current.invoke<PreparedOauthLogin>("prepare_oauth_login", {
         accountId: reauthorizeAccount?.id ?? null,
       });
     } catch (error) {
@@ -1658,7 +1749,7 @@ export function useCodexController(
     async (url: string) => {
       setOauthWaitingForCallback(true);
       try {
-        await invoke<void>("open_external_url", { url });
+        await projectCommands.current.invoke<void>("open_authorization_url", { url, application: savedAuthorizationApp()?.path ?? null });
       } catch (error) {
         setOauthWaitingForCallback(false);
         setNotice({
@@ -1675,7 +1766,7 @@ export function useCodexController(
   const onCancelOauthLogin = useCallback(async () => {
     setOauthWaitingForCallback(false);
     try {
-      await invoke<void>("cancel_oauth_login");
+      await projectCommands.current.invoke<void>("cancel_oauth_login");
     } catch {
       // Ignore cancel failures so closing the dialog stays responsive.
     }
@@ -1706,7 +1797,7 @@ export function useCodexController(
 
     setImportingAccounts(true);
     try {
-      await invoke<AccountSummary>("import_current_auth_account", {
+      await projectCommands.current.invoke<AccountSummary>("import_current_auth_account", {
         label: null,
       });
       await refreshUsage(true, false, false, "account-import");
@@ -1744,7 +1835,7 @@ export function useCodexController(
 
       setImportingAccounts(true);
       try {
-        const result = await invoke<ImportAccountsResult>(
+        const result = await projectCommands.current.invoke<ImportAccountsResult>(
           "import_auth_json_accounts",
           {
             items,
@@ -1773,7 +1864,7 @@ export function useCodexController(
     async (input: CreateApiAccountInput) => {
       setImportingAccounts(true);
       try {
-        await invoke<AccountSummary>("create_api_account", { input });
+        await projectCommands.current.invoke<AccountSummary>("create_api_account", { input });
         await loadAccounts();
         void remoteProxyAutoRedeployRef.current();
         setAddDialogOpen(false);
@@ -1798,7 +1889,7 @@ export function useCodexController(
   const onTestApiAccountConnection = useCallback(
     async (input: TestApiAccountConnectionInput) => {
       try {
-        return await invoke<TestApiAccountConnectionResult>(
+        return await projectCommands.current.invoke<TestApiAccountConnectionResult>(
           "test_api_account_connection",
           {
             input,
@@ -1816,7 +1907,7 @@ export function useCodexController(
       setOauthWaitingForCallback(false);
       setImportingAccounts(true);
       try {
-        const result = await invoke<ImportAccountsResult>(
+        const result = await projectCommands.current.invoke<ImportAccountsResult>(
           "complete_oauth_callback_login",
           {
             callbackUrl,
@@ -1857,7 +1948,7 @@ export function useCodexController(
 
       setExportingAccounts(true);
       try {
-        const exportedPath = await invoke<string | null>(
+        const exportedPath = await projectCommands.current.invoke<string | null>(
           "export_accounts_zip",
           {
             accountKey: account?.accountKey ?? null,
@@ -1888,7 +1979,7 @@ export function useCodexController(
 
       setStartingApiProxy(true);
       try {
-        const status = await invoke<ApiProxyStatus>("start_api_proxy", {
+        const status = await projectCommands.current.invoke<ApiProxyStatus>("start_api_proxy", {
           port: port ?? null,
         });
         setApiProxyStatus(localizeApiProxyStatus(status));
@@ -1921,7 +2012,7 @@ export function useCodexController(
 
     setStoppingApiProxy(true);
     try {
-      const status = await invoke<ApiProxyStatus>("stop_api_proxy");
+      const status = await projectCommands.current.invoke<ApiProxyStatus>("stop_api_proxy");
       setApiProxyStatus(localizeApiProxyStatus(status));
       setNotice({ type: "ok", message: copy.notices.proxyStopped });
     } catch (error) {
@@ -1947,7 +2038,7 @@ export function useCodexController(
 
     setRefreshingApiProxyKey(true);
     try {
-      const status = await invoke<ApiProxyStatus>("refresh_api_proxy_key");
+      const status = await projectCommands.current.invoke<ApiProxyStatus>("refresh_api_proxy_key");
       setApiProxyStatus(localizeApiProxyStatus(status));
       await loadApiProxyKeys();
       setNotice({ type: "ok", message: copy.notices.proxyKeyRefreshed });
@@ -1976,7 +2067,7 @@ export function useCodexController(
 
     setBindingCodexProxy(true);
     try {
-      const status = await invoke<ApiProxyStatus>("bind_codex_to_api_proxy");
+      const status = await projectCommands.current.invoke<ApiProxyStatus>("bind_codex_to_api_proxy");
       setApiProxyStatus(localizeApiProxyStatus(status));
       setNotice({ type: "ok", message: copy.notices.codexProxyBound });
     } catch (error) {
@@ -2004,7 +2095,7 @@ export function useCodexController(
 
     setRestoringCodexProxy(true);
     try {
-      const status = await invoke<ApiProxyStatus>(
+      const status = await projectCommands.current.invoke<ApiProxyStatus>(
         "restore_codex_proxy_binding",
       );
       setApiProxyStatus(localizeApiProxyStatus(status));
@@ -2043,7 +2134,7 @@ export function useCodexController(
       }
       setSavingApiProxyKey(true);
       try {
-        const keys = await invoke<ApiProxyKey[]>("create_api_proxy_key", {
+        const keys = await projectCommands.current.invoke<ApiProxyKey[]>("create_api_proxy_key", {
           input,
         });
         await replaceApiProxyKeys(keys);
@@ -2064,7 +2155,7 @@ export function useCodexController(
       }
       setSavingApiProxyKey(true);
       try {
-        const keys = await invoke<ApiProxyKey[]>("update_api_proxy_key", {
+        const keys = await projectCommands.current.invoke<ApiProxyKey[]>("update_api_proxy_key", {
           input,
         });
         await replaceApiProxyKeys(keys);
@@ -2085,7 +2176,7 @@ export function useCodexController(
       }
       setSavingApiProxyKey(true);
       try {
-        const keys = await invoke<ApiProxyKey[]>("delete_api_proxy_key", {
+        const keys = await projectCommands.current.invoke<ApiProxyKey[]>("delete_api_proxy_key", {
           id,
         });
         await replaceApiProxyKeys(keys);
@@ -2106,7 +2197,7 @@ export function useCodexController(
       }
       setSavingApiProxyKey(true);
       try {
-        const keys = await invoke<ApiProxyKey[]>("regenerate_api_proxy_key", {
+        const keys = await projectCommands.current.invoke<ApiProxyKey[]>("regenerate_api_proxy_key", {
           id,
         });
         await replaceApiProxyKeys(keys);
@@ -2148,7 +2239,7 @@ export function useCodexController(
 
       setApiProxyUsageExporting(true);
       try {
-        const exportPath = await invoke<string | null>("export_api_proxy_usage", {
+        const exportPath = await projectCommands.current.invoke<string | null>("export_api_proxy_usage", {
           rangeSeconds: API_PROXY_USAGE_RANGE_SECONDS[apiProxyUsageRange],
           keyId,
         });
@@ -2180,7 +2271,7 @@ export function useCodexController(
 
     setApiProxyUsageClearing(true);
     try {
-      await invoke("clear_api_proxy_usage_stats");
+      await projectCommands.current.invoke("clear_api_proxy_usage_stats");
       setNotice({ type: "ok", message: copy.notices.apiProxyUsageCleared });
     } catch (error) {
       setNotice({
@@ -2209,7 +2300,7 @@ export function useCodexController(
       }
 
       try {
-        const available = await invoke<boolean>("is_sshpass_available");
+        const available = await projectCommands.current.invoke<boolean>("is_sshpass_available");
         if (available) {
           return true;
         }
@@ -2220,7 +2311,7 @@ export function useCodexController(
           type: "info",
           message: copy.notices.installingDependency("sshpass"),
         });
-        await invoke("install_sshpass");
+        await projectCommands.current.invoke("install_sshpass");
         setNotice({
           type: "ok",
           message: copy.notices.dependencyInstalled("sshpass"),
@@ -2255,7 +2346,7 @@ export function useCodexController(
 
       setRefreshingRemoteProxyId(server.id);
       try {
-        const status = await invoke<RemoteProxyStatus>(
+        const status = await projectCommands.current.invoke<RemoteProxyStatus>(
           "get_remote_proxy_status",
           { server },
         );
@@ -2310,7 +2401,7 @@ export function useCodexController(
 
       setDeployingRemoteProxyId(server.id);
       try {
-        const status = await invoke<RemoteProxyStatus>("deploy_remote_proxy", {
+        const status = await projectCommands.current.invoke<RemoteProxyStatus>("deploy_remote_proxy", {
           input: {
             server,
           },
@@ -2386,7 +2477,7 @@ export function useCodexController(
           detail: null,
         });
         try {
-          const status = await invoke<RemoteProxyStatus>("deploy_remote_proxy", {
+          const status = await projectCommands.current.invoke<RemoteProxyStatus>("deploy_remote_proxy", {
             input: { server },
           });
           setRemoteProxyStatusesRaw((current) => ({
@@ -2439,7 +2530,7 @@ export function useCodexController(
 
       setStartingRemoteProxyId(server.id);
       try {
-        const status = await invoke<RemoteProxyStatus>("start_remote_proxy", {
+        const status = await projectCommands.current.invoke<RemoteProxyStatus>("start_remote_proxy", {
           server,
         });
         setRemoteProxyStatusesRaw((current) => ({
@@ -2486,7 +2577,7 @@ export function useCodexController(
 
       setStoppingRemoteProxyId(server.id);
       try {
-        const status = await invoke<RemoteProxyStatus>("stop_remote_proxy", {
+        const status = await projectCommands.current.invoke<RemoteProxyStatus>("stop_remote_proxy", {
           server,
         });
         setRemoteProxyStatusesRaw((current) => ({
@@ -2533,7 +2624,7 @@ export function useCodexController(
 
       setReadingRemoteLogsId(server.id);
       try {
-        const output = await invoke<string>("read_remote_proxy_logs", {
+        const output = await projectCommands.current.invoke<string>("read_remote_proxy_logs", {
           server,
           lines: 120,
         });
@@ -2563,7 +2654,7 @@ export function useCodexController(
 
   const onPickLocalIdentityFile = useCallback(async () => {
     try {
-      return await invoke<string | null>("pick_local_identity_file");
+      return await projectCommands.current.invoke<string | null>("pick_local_identity_file");
     } catch (error) {
       setNotice({
         type: "error",
@@ -2582,7 +2673,7 @@ export function useCodexController(
 
     setInstallingCloudflared(true);
     try {
-      const status = await invoke<CloudflaredStatus>("install_cloudflared");
+      const status = await projectCommands.current.invoke<CloudflaredStatus>("install_cloudflared");
       setCloudflaredStatus(localizeCloudflaredStatus(status));
       setNotice({ type: "ok", message: copy.notices.cloudflaredInstalled });
     } catch (error) {
@@ -2610,7 +2701,7 @@ export function useCodexController(
 
       setStartingCloudflared(true);
       try {
-        const status = await invoke<CloudflaredStatus>(
+        const status = await projectCommands.current.invoke<CloudflaredStatus>(
           "start_cloudflared_tunnel",
           { input },
         );
@@ -2648,7 +2739,7 @@ export function useCodexController(
 
     setStoppingCloudflared(true);
     try {
-      const status = await invoke<CloudflaredStatus>("stop_cloudflared_tunnel");
+      const status = await projectCommands.current.invoke<CloudflaredStatus>("stop_cloudflared_tunnel");
       setCloudflaredStatus(localizeCloudflaredStatus(status));
       setNotice({ type: "ok", message: copy.notices.cloudflaredStopped });
     } catch (error) {
@@ -2684,7 +2775,7 @@ export function useCodexController(
 
       setRenamingAccountId(account.accountKey);
       try {
-        const resolvedLabel = await invoke<string>("update_account_label", {
+        const resolvedLabel = await projectCommands.current.invoke<string>("update_account_label", {
           accountKey: account.accountKey,
           label: normalizedLabel,
         });
@@ -2743,7 +2834,7 @@ export function useCodexController(
       );
 
       try {
-        const resolvedEnabled = await invoke<boolean>(
+        const resolvedEnabled = await projectCommands.current.invoke<boolean>(
           "update_account_api_proxy_enabled",
           {
             accountKey: account.accountKey,
@@ -2815,12 +2906,12 @@ export function useCodexController(
 
   const onWarmupAccount = useCallback(
     async (account: AccountSummary) => {
-      if (warmingAccountId !== null || account.sourceKind === "relay") {
+      if (authBusy || account.sourceKind === "relay") {
         return false;
       }
       setWarmingAccountId(account.id);
       try {
-        const result = await invoke<AccountWarmupResult>("warmup_account", {
+        const result = await projectCommands.current.invoke<AccountWarmupResult>("warmup_account", {
           id: account.id,
         });
         applyAccounts(result.accounts);
@@ -2849,7 +2940,7 @@ export function useCodexController(
         setWarmingAccountId(null);
       }
     },
-    [applyAccounts, copy.notices, localizeError, warmingAccountId],
+    [applyAccounts, authBusy, copy.notices, localizeError],
   );
 
   const onCancelDelete = useCallback(() => {
@@ -2868,7 +2959,7 @@ export function useCodexController(
       const account = deleteCandidate;
       setDeletingAccountId(account.id);
       try {
-        await invoke<void>("delete_account", { id: account.id });
+        await projectCommands.current.invoke<void>("delete_account", { id: account.id });
         setAccounts((prev) => prev.filter((item) => item.id !== account.id));
         void remoteProxyAutoRedeployRef.current();
         setDeleteCandidate(null);
@@ -2888,6 +2979,7 @@ export function useCodexController(
   const onSwitch = useCallback(
     async (account: AccountSummary) => {
       if (
+        recoveryRequired ||
         switchInFlightRef.current ||
         importingAccounts ||
         oauthWaitingForCallback
@@ -2898,38 +2990,42 @@ export function useCodexController(
       switchInFlightRef.current = true;
       setSwitchingId(account.id);
       try {
-        const result = await invoke<SwitchAccountResult>(
-          "switch_account_and_launch",
-          {
-            id: account.id,
-            workspacePath: null,
-            launchCodex: settings.launchCodexAfterSwitch,
-            restartEditorsOnSwitch: settings.restartEditorsOnSwitch,
-            restartEditorTargets: settings.restartEditorTargets,
-          },
-        );
+        const result = await switchLocalProjects({
+          preserve: settings.preserveLocalProjects,
+          sourceKind: account.sourceKind,
+          preview: () => projectCommands.current.invoke<LocalProjectSwitchPreview>("preview_local_project_switch", { id: account.id }),
+          confirm: (preview) => requestLocalProjectMerge({ label: account.label, preview }),
+          switchAccount: (preservationArgs) => projectCommands.current.invoke<SwitchAccountResult>(
+            "switch_account_and_launch",
+            {
+              id: account.id,
+              workspacePath: null,
+              launchCodex: settings.launchCodexAfterSwitch,
+              restartEditorsOnSwitch: settings.restartEditorsOnSwitch,
+              restartEditorTargets: settings.restartEditorTargets,
+              ...preservationArgs,
+            },
+          ),
+        });
+        if (!result) return false;
+        // Pending means post-launch verification is incomplete, not that a
+        // transaction journal needs recovery. The command gate handles an
+        // actual RECOVERY_REQUIRED error independently when reloading.
         await loadAccounts();
 
         if (result.noOp) {
           // 兼容后端判定出的同账号 no-op，只刷新状态并提示当前账号。
-          if (result.providerSyncError) {
-            setNotice({
-              type: "error",
-              message: copy.notices.providerSyncFailed(
+          const noOpNotice: Notice = result.providerSyncError
+            ? { type: "error", message: copy.notices.providerSyncFailed(
                 copy.notices.accountAlreadyCurrent,
                 localizeError(result.providerSyncError),
-              ),
-            });
-          } else {
-            setNotice({
-              type: "info",
-              message: copy.notices.accountAlreadyCurrent,
-            });
-          }
+              ) }
+            : { type: "info", message: copy.notices.accountAlreadyCurrent };
+          setNotice(appendLocalProjectNotice(noOpNotice, result.localProjectPreservation, copy.localProjects));
           return false;
         }
 
-        void remoteProxyAutoRedeployRef.current();
+        if (result.localProjectPreservation?.status !== "pending") void remoteProxyAutoRedeployRef.current();
 
         let baseNotice: Notice;
         if (!settings.launchCodexAfterSwitch) {
@@ -2946,82 +3042,90 @@ export function useCodexController(
           };
         }
 
-        if (settings.syncOpencodeOpenaiAuth) {
-          if (result.opencodeSyncError) {
-            baseNotice = {
-              type: "error",
-              message: copy.notices.opencodeSyncFailed(
-                baseNotice.message,
-                localizeError(result.opencodeSyncError),
-              ),
-            };
-          } else if (result.opencodeSynced) {
-            baseNotice = {
-              ...baseNotice,
-              message: copy.notices.opencodeSynced(baseNotice.message),
-            };
-          }
+        const switchNotice = composeLocalProjectSwitchNotice(
+          baseNotice,
+          result.localProjectPreservation,
+          copy.localProjects,
+          (baseNotice) => {
+            if (settings.syncOpencodeOpenaiAuth) {
+              if (result.opencodeSyncError) {
+                baseNotice = {
+                  type: "error",
+                  message: copy.notices.opencodeSyncFailed(
+                    baseNotice.message,
+                    localizeError(result.opencodeSyncError),
+                  ),
+                };
+              } else if (result.opencodeSynced) {
+                baseNotice = {
+                  ...baseNotice,
+                  message: copy.notices.opencodeSynced(baseNotice.message),
+                };
+              }
 
-          if (settings.restartOpencodeDesktopOnSwitch) {
-            if (result.opencodeDesktopRestartError) {
+              if (settings.restartOpencodeDesktopOnSwitch) {
+                if (result.opencodeDesktopRestartError) {
+                  baseNotice = {
+                    type: "error",
+                    message: copy.notices.opencodeDesktopRestartFailed(
+                      baseNotice.message,
+                      localizeError(result.opencodeDesktopRestartError),
+                    ),
+                  };
+                } else if (result.opencodeDesktopRestarted) {
+                  baseNotice = {
+                    ...baseNotice,
+                    message: copy.notices.opencodeDesktopRestarted(
+                      baseNotice.message,
+                    ),
+                  };
+                }
+              }
+            }
+
+            if (settings.restartEditorsOnSwitch) {
+              if (result.editorRestartError) {
+                baseNotice = {
+                  type: "error",
+                  message: copy.notices.editorRestartFailed(
+                    baseNotice.message,
+                    localizeError(result.editorRestartError),
+                  ),
+                };
+              } else if (result.restartedEditorApps.length > 0) {
+                const restartedLabels = result.restartedEditorApps
+                  .map((id) => copy.editorAppLabels[id] ?? id)
+                  .join(" / ");
+                baseNotice = {
+                  ...baseNotice,
+                  message: copy.notices.editorsRestarted(
+                    baseNotice.message,
+                    restartedLabels,
+                  ),
+                };
+              } else {
+                baseNotice = {
+                  ...baseNotice,
+                  message: copy.notices.noEditorRestarted(baseNotice.message),
+                };
+              }
+            }
+
+            if (result.providerSyncError) {
               baseNotice = {
                 type: "error",
-                message: copy.notices.opencodeDesktopRestartFailed(
+                message: copy.notices.providerSyncFailed(
                   baseNotice.message,
-                  localizeError(result.opencodeDesktopRestartError),
-                ),
-              };
-            } else if (result.opencodeDesktopRestarted) {
-              baseNotice = {
-                ...baseNotice,
-                message: copy.notices.opencodeDesktopRestarted(
-                  baseNotice.message,
+                  localizeError(result.providerSyncError),
                 ),
               };
             }
-          }
-        }
+            return baseNotice;
+          },
+        );
 
-        if (settings.restartEditorsOnSwitch) {
-          if (result.editorRestartError) {
-            baseNotice = {
-              type: "error",
-              message: copy.notices.editorRestartFailed(
-                baseNotice.message,
-                localizeError(result.editorRestartError),
-              ),
-            };
-          } else if (result.restartedEditorApps.length > 0) {
-            const restartedLabels = result.restartedEditorApps
-              .map((id) => copy.editorAppLabels[id] ?? id)
-              .join(" / ");
-            baseNotice = {
-              ...baseNotice,
-              message: copy.notices.editorsRestarted(
-                baseNotice.message,
-                restartedLabels,
-              ),
-            };
-          } else {
-            baseNotice = {
-              ...baseNotice,
-              message: copy.notices.noEditorRestarted(baseNotice.message),
-            };
-          }
-        }
-
-        if (result.providerSyncError) {
-          baseNotice = {
-            type: "error",
-            message: copy.notices.providerSyncFailed(
-              baseNotice.message,
-              localizeError(result.providerSyncError),
-            ),
-          };
-        }
-
-        setNotice(baseNotice);
-        return true;
+        setNotice(switchNotice);
+        return result.localProjectPreservation?.status !== "pending";
       } catch (error) {
         try {
           await loadAccounts();
@@ -3041,6 +3145,11 @@ export function useCodexController(
     [
       copy.editorAppLabels,
       copy.notices,
+      copy.localProjects,
+      recoveryRequired,
+      switchLocalProjects,
+      requestLocalProjectMerge,
+      settings.preserveLocalProjects,
       importingAccounts,
       loadAccounts,
       localizeError,
@@ -3096,10 +3205,17 @@ export function useCodexController(
   const apiAccountEditor = useApiAccountEditor(async () => {
     await loadAccounts();
     void remoteProxyAutoRedeployRef.current();
-  });
+  }, { invokeCommand: projectCommands.current.invoke, localizeError });
 
   return {
     accounts: sortedAccounts,
+    recoveryRequired,
+    recoveringLocalProjects,
+    onRecoverLocalProjects,
+    localProjectMergeRequest,
+    answerLocalProjectMerge,
+    localProjectRecoveryConfirmation,
+    answerLocalProjectRecovery,
     apiAccountEditor,
     tokenUsage,
     tokenUsageError,
@@ -3153,6 +3269,7 @@ export function useCodexController(
     stoppingCloudflared,
     switchingId,
     warmingAccountId,
+    resettingAccountId,
     renamingAccountId,
     pendingDeleteId: deleteCandidate?.id ?? null,
     deleteCandidate,
@@ -3225,6 +3342,7 @@ export function useCodexController(
     onToggleAccountApiProxy,
     onDelete,
     onWarmupAccount,
+    onUseResetCredit,
     onCancelDelete,
     onConfirmDelete,
     onSwitch,
