@@ -548,15 +548,23 @@ pub(crate) fn enabled_at_path(path: &Path) -> Result<bool, String> {
 pub(crate) async fn execute_with_refresh(
     paths: &SwitchPaths,
     target: &str,
-    options: SwitchOptions,
+    mut options: SwitchOptions,
     lifecycle: &mut impl DesktopLifecycle,
 ) -> Result<PreparedSwitch, String> {
-    execute_with_injected_refresh(paths, target, options, lifecycle, |auth| async move {
-        crate::auth::refresh_chatgpt_auth_tokens(&auth)
-            .await
-            .map_err(|_| "PROJECT_SHARING_AUTH_REFRESH_FAILED".into())
-    })
-    .await
+    // 切换只安装已保存的凭证。access token 过期时也不向认证服务刷新，
+    // 否则刷新失败会挡住切换，成功则会轮换 refresh token，使其他副本失效。
+    // 本机若已有同一账号更新过的快照，用那一份。
+    if options.target_auth.is_none() {
+        if let Ok(plan) = make_plan(paths, target, None) {
+            if let Some(live) = crate::auth::newer_live_auth_for_account(
+                &plan.account.account_key(),
+                &plan.account.auth_json,
+            ) {
+                options.target_auth = Some(live);
+            }
+        }
+    }
+    execute(paths, target, options, lifecycle)
 }
 async fn execute_with_injected_refresh<F, Fut>(
     paths: &SwitchPaths,
